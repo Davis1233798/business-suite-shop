@@ -82,48 +82,6 @@ export const outboxEvents = sqliteTable("outbox_events", {
 // 2. MES「ForgeFlow」Tables
 // ==========================================
 
-export const mesWorkOrders = sqliteTable("mes_work_orders", {
-  id: text("id").primaryKey(),
-  organizationId: text("organization_id").notNull(),
-  orderNo: text("order_no").notNull(),
-  productId: text("product_id").notNull(),
-  bomVersionId: text("bom_version_id").notNull(),
-  targetQuantity: integer("target_quantity").notNull(),
-  completedQuantity: integer("completed_quantity").notNull().default(0),
-  scrappedQuantity: integer("scrapped_quantity").notNull().default(0),
-  status: text("status").notNull().default("draft"), // draft, released, in_progress, completed, closed
-  materialsStaged: integer("materials_staged", { mode: "boolean" }).notNull().default(false),
-  scheduledMinutes: integer("scheduled_minutes").notNull().default(480),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
-
-export const mesOperations = sqliteTable("mes_operations", {
-  id: text("id").primaryKey(),
-  organizationId: text("organization_id").notNull(),
-  workOrderId: text("work_order_id").notNull(),
-  sequence: integer("sequence").notNull(),
-  workCenterId: text("work_center_id").notNull(),
-  name: text("name").notNull(),
-  standardMinutesPerUnit: integer("standard_minutes_per_unit").notNull().default(1),
-  status: text("status").notNull().default("pending"), // pending, running, completed
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
-
-export const mesQualityChecks = sqliteTable("mes_quality_checks", {
-  id: text("id").primaryKey(),
-  organizationId: text("organization_id").notNull(),
-  workOrderId: text("work_order_id").notNull(),
-  reportId: text("report_id"),
-  inspectorId: text("inspector_id").notNull(),
-  sampleQuantity: integer("sample_quantity").notNull(),
-  passedQuantity: integer("passed_quantity").notNull(),
-  failedQuantity: integer("failed_quantity").notNull(),
-  status: text("status").notNull().default("passed"), // passed, quarantined, reworked
-  disposition: text("disposition"),
-  notes: text("notes"),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
-
 export const erpItems = sqliteTable("erp_items", {
   id: text("id").primaryKey(),
   organizationId: text("organization_id").notNull(),

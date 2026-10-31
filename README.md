@@ -16,7 +16,7 @@ node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1
 npm run dev
 ```
 
-依終端機印出的網址開啟；若開發 Worker 所用的本機 D1 尚未初始化本站標記，會回傳 503。上述初始化與 dev 讀取已在隔離的乾淨 checkout 測試；請勿對既有 D1 直接執行新庫 SQL。Node SQLite 後備模式使用 repo 根目錄的 `.data/shop-vinext.sqlite`；Worker 使用 D1 綁定，兩者資料不共用。以下以 `go -C backend run .` 執行時，Go 工作站的預設資料庫位於 `backend/.data/shop-repository.sqlite`，與 Vinext 資料不共用。
+依終端機印出的網址開啟；若開發 Worker 所用的本機 D1 尚未初始化本站標記，會回傳 503。上述初始化與 dev 讀取已在隔離的 Git archive 測試（使用既有 node_modules，未在該測試中重新安裝依賴）；請勿對既有 D1 直接執行新庫 SQL。Node SQLite 後備模式使用 repo 根目錄的 `.data/shop-vinext.sqlite`；Worker 使用 D1 綁定，兩者資料不共用。以下以 `go -C backend run .` 執行時，Go 工作站的預設資料庫位於 `backend/.data/shop-repository.sqlite`，與 Vinext 資料不共用。
 
 ```powershell
 npm test
@@ -28,11 +28,15 @@ go -C backend run .
 
 Go 工作站可從 `http://127.0.0.1:8095/shop/login` 進入。Go 預設資料庫可用 `SUITE_DB` 指定；既有含 `organizations` 且缺少 `shop_repository_schema` 標記的資料庫會被拒絕。Vinext 本機資料庫也檢查本站標記。請使用新路徑，舊資料不會自動遷移。
 
-本站 `npm test` 最近通過 23 項，Go 測試及建置亦通過；測試已裁剪為本站範圍，原跨系統測試留在作品集 repo，不能視為跨系統或正式部署驗收。Vinext 開發模式 HTTP smoke 已檢查本站、health 與他站拒絕，尚未涵蓋全部業務流程。
+本站 `npm test`、Go 測試及建置曾通過；測試已裁剪為本站範圍，原跨系統測試留在作品集 repo，不能視為跨系統或正式部署驗收。Vinext 開發模式 HTTP smoke 已檢查本站、health 與他站拒絕，尚未涵蓋全部業務流程。
 
 ## D1 與部署
 
 `drizzle/shop_d1_new_database.sql` 僅供**新空 D1** 初始化；Worker 缺少本站標記時回傳 503。本站 bootstrap 已在隔離的本地 Wrangler D1 執行，production bundle 的本地 Worker `/api/health` 回傳 200 且顯示資料庫連線；並已執行本站一項代表性業務寫入及讀回；這不涵蓋遠端 D1、全部業務流程或部署。新 D1 的雲端部署與資料移轉尚未驗證。不要套用至舊資料庫、覆蓋既有 hosting identity 或直接切換正式站；先完成備份、遷移、核對及回滾計畫。
+
+本機 Vinext SQLite 的離線整庫快照操作與限制見 [API 文件](docs/API.md)；快照含所有租戶的明文資料，不支援 D1 或 SQLCipher。
+
+Outbox 派送器只處理電商事件，不派送其他系統事件；仍需另行設定及驗證接收端。
 
 ## 限制
 
