@@ -6,6 +6,13 @@ import { demoSeedStates } from "./db/schema";
 import { eq } from "drizzle-orm";
 const seeding = new Map<string, Promise<unknown>>();
 export async function middleware(request: NextRequest) {
+  // Restrict the legacy application to this repository's system before seeding.
+  const parts = request.nextUrl.pathname.split("/").filter(Boolean);
+  const systems: Record<string, string> = { mes: "mes", erp: "erp", pos: "pos", crm: "crm", dining: "dining", shop: "shop", commerce: "shop" };
+  const target = parts[0] === "api" ? (parts[1] === "operations" ? parts[2] : parts[1]) : parts[0];
+  if ((target && systems[target] && systems[target] !== "shop") || (parts[0] === "api" && (parts[1] === "workspace" || parts[1] === "seed")) || parts[0] === "platform") {
+    return new NextResponse("Not found", { status: 404 });
+  }
   // Container probes must not create a fresh tenant, seed data or Outbox events.
   if (request.nextUrl.pathname === '/api/health') return NextResponse.next();
   const previous = request.cookies.get(SESSION_COOKIE)?.value;

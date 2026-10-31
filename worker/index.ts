@@ -7,7 +7,13 @@ import { dispatchInfrastructureOutbox } from "../lib/infrastructure-outbox";
 import { proxyPlatformControl } from "../lib/platform-control";
 
 const worker = {
-  fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
+  async fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
+    if (!env.DB) return new Response("Database binding unavailable", { status: 503 });
+    // Refuse old or incorrectly bound D1 databases before any handler can write.
+    try {
+      const marker = await env.DB.prepare("SELECT version FROM shop_vinext_schema WHERE version = 1 LIMIT 1").first();
+      if (!marker) return new Response("Database not initialized for this system", { status: 503 });
+    } catch { return new Response("Database not initialized for this system", { status: 503 }); }
     if (new URL(request.url).pathname.startsWith("/api/platform/control/")) return proxyPlatformControl(request, env.PLATFORM_CONTROL_URL);
     // Service-only scheduler endpoint bypasses demonstration identity and seeding.
     if (new URL(request.url).pathname === "/api/platform/dispatch") {
@@ -38,6 +44,9 @@ const worker = {
     return runWithInfrastructure(env, () => runWithDatabase(env.DB, () => runWithConnectorBinding(binding, () => handler.fetch(request, env, ctx))));
   },
   async scheduled(_event: ScheduledController, env: Cloudflare.Env) {
+    if (!env.DB) throw new Error("Database binding unavailable");
+    const marker = await env.DB.prepare("SELECT version FROM shop_vinext_schema WHERE version = 1 LIMIT 1").first();
+    if (!marker) throw new Error("Database not initialized for this system");
     try { await runWithInfrastructure(env, () => runWithDatabase(env.DB, dispatchInfrastructureOutbox)); }
     catch (error) { console.error("Infrastructure scheduled dispatch failed", error instanceof Error ? error.message : "unknown"); throw error; }
   },

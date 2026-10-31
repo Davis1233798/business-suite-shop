@@ -11,8 +11,8 @@ import (
 func (a *App) trafficAPI(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	site := r.PathValue("site")
-	if site != "mes" && site != "shop" {
-		fail(w, 404, "Traffic lab is only available for manufacturing and commerce")
+	if site != repositorySite {
+		fail(w, 404, "Traffic lab is unavailable for this workspace")
 		return
 	}
 	id, err := a.identity(r)

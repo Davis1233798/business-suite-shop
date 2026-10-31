@@ -1,0 +1,120 @@
+{
+  "shop_categories": [
+    {
+      "id": "shop_cat_01_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "name": "極簡機能服飾",
+      "slug": "apparel",
+      "created_at": "2026-10-30 16:30:21"
+    },
+    {
+      "id": "shop_cat_02_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "name": "都市生活配件",
+      "slug": "accessories",
+      "created_at": "2026-10-30 16:30:21"
+    }
+  ],
+  "shop_order_items": [
+    {
+      "id": "shop_oi_01_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "order_id": "shop_ord_01_org_go_fixture",
+      "variant_id": "shop_var_01_org_go_fixture",
+      "product_name": "極簡防風連帽機能外套",
+      "variant_title": "曜石黑 / M",
+      "sku": "ML-HD-BLK-M",
+      "unit_price": 100,
+      "quantity": 2,
+      "line_total": 200,
+      "created_at": "2026-10-30 16:30:21"
+    }
+  ],
+  "shop_orders": [
+    {
+      "id": "shop_ord_01_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "order_number": "ORD-202610-001",
+      "user_id": null,
+      "customer_email": "buyer@sites.test",
+      "shipping_address_json": "{\"name\":\"示範收件人 A\",\"city\":\"台北市\",\"address\":\"示範路段 A（非實際地址）\",\"phone\":\"DEMO-PHONE-004\"}",
+      "subtotal": 200,
+      "discount_amount": 20,
+      "shipping_fee": 60,
+      "total_amount": 240,
+      "payment_status": "paid",
+      "fulfillment_status": "shipped",
+      "tracking_number": "TRK-TW-888999",
+      "idempotency_key": null,
+      "created_at": "2026-10-30 16:30:21"
+    }
+  ],
+  "shop_products": [
+    {
+      "id": "shop_prd_01_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "name": "極簡防風連帽機能外套",
+      "slug": "minimalist-tech-hoodie",
+      "description": "採用防潑水三層透氣微孔科技面料，適合都會通勤與戶外輕機能穿搭。",
+      "category_id": "shop_cat_01_org_go_fixture",
+      "is_active": 1,
+      "created_at": "2026-10-30 16:30:21"
+    }
+  ],
+  "shop_promotions": [
+    {
+      "id": "shop_promo_01_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "code": "SAVE10",
+      "description": "秋季全站 9 折優惠券",
+      "discount_type": "percentage",
+      "discount_value": 10,
+      "min_spend": 0,
+      "expires_at": null,
+      "is_active": 1,
+      "created_at": "2026-10-30 16:30:21"
+    },
+    {
+      "id": "shop_promo_02_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "code": "EXPIRED50",
+      "description": "已過期優惠券",
+      "discount_type": "fixed",
+      "discount_value": 50,
+      "min_spend": 200,
+      "expires_at": "2020-01-01 00:00:00",
+      "is_active": 0,
+      "created_at": "2026-10-30 16:30:21"
+    }
+  ],
+  "shop_variants": [
+    {
+      "id": "shop_var_01_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "product_id": "shop_prd_01_org_go_fixture",
+      "sku": "ML-HD-BLK-M",
+      "title": "曜石黑 / M",
+      "color": "曜石黑",
+      "size": "M",
+      "price": 100,
+      "stock_quantity": 20,
+      "reserved_quantity": 0,
+      "is_active": 1,
+      "created_at": "2026-10-30 16:30:21"
+    },
+    {
+      "id": "shop_var_02_org_go_fixture",
+      "organization_id": "org_go_fixture",
+      "product_id": "shop_prd_01_org_go_fixture",
+      "sku": "ML-HD-BLK-L",
+      "title": "曜石黑 / L",
+      "color": "曜石黑",
+      "size": "L",
+      "price": 100,
+      "stock_quantity": 1,
+      "reserved_quantity": 0,
+      "is_active": 1,
+      "created_at": "2026-10-30 16:30:21"
+    }
+  ]
+}

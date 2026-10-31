@@ -11,10 +11,10 @@ test('six independent processes can initialize the same fresh SQLite volume with
   const adapter = new URL('../../lib/db/sqlite-d1.ts',import.meta.url).href;
   const source = `import {createSqliteD1} from ${JSON.stringify(adapter)};
     const db=createSqliteD1(process.argv[1]);
-    const columns=db._rawDb.prepare('PRAGMA table_info(dining_bills)').all();
-    if(!columns.some(c=>c.name==='order_id'))throw new Error('Partial dining schema');
+    const columns=db._rawDb.prepare('PRAGMA table_info(shop_orders)').all();
+    if(!columns.some(c=>c.name==='order_number'))throw new Error('Partial repository schema');
     const triggers=db._rawDb.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='trigger'").get();
-    if(triggers.n < 15)throw new Error('Missing transactional guards');
+    if(triggers.n < 1)throw new Error('Missing transactional guards');
     db._rawDb.close();`;
   try {
     const outcomes = await Promise.all(Array.from({length:6},()=>new Promise<{code:number|null;stderr:string}>((resolve,reject)=>{

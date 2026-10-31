@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-//go:embed migrations/*.sql migrations/fixtures.json
+//go:embed migrations/*.sql migrations/fixtures.json migrations/shop_fixtures.json
 var migrations embed.FS
 var sites = []string{"mes", "erp", "pos", "crm", "dining", "shop"}
 
@@ -73,7 +73,13 @@ func passwordOK(password, encoded string) bool {
 	v, e := passwordHash(password, p[2])
 	return e == nil && subtle.ConstantTimeCompare([]byte(v), []byte(encoded)) == 1
 }
+
+const repositorySite = "shop"
+
 func knownSite(site string) bool {
+	if site != repositorySite {
+		return false
+	}
 	for _, s := range sites {
 		if s == site {
 			return true
@@ -109,30 +115,20 @@ func openDB(file string) (*sql.DB, error) {
 	}
 	files := []string{}
 	if n == 0 {
-		files = append(files, "0000_spicy_bromley.sql")
-	}
-	files = append(files, "0001_transaction_guards.sql")
-	rows, e := tx.Query("PRAGMA table_info(dining_bills)")
-	if e != nil {
-		return nil, e
-	}
-	hasOrder := false
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, typ string
-		var def any
-		if e = rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); e != nil {
+		files = append(files, "shop_initial.sql")
+	} else {
+		var marker int
+		if e = tx.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='shop_repository_schema'").Scan(&marker); e != nil {
 			return nil, e
 		}
-		if name == "order_id" {
-			hasOrder = true
+		if marker == 0 {
+			tx.Rollback()
+			db.Close()
+			return nil, fmt.Errorf("refusing existing database without shop repository marker; use a new database path")
 		}
 	}
-	rows.Close()
-	if !hasOrder {
-		files = append(files, "0002_dining_takeout.sql")
-	}
-	files = append(files, "0003_mes_projection.sql", "0004_station_identity.sql", "0005_traffic_lab.sql")
+	files = append(files, "shop_guards.sql")
+	files = append(files, "0004_station_identity.sql", "0005_traffic_lab.sql")
 	for _, f := range files {
 		b, err := migrations.ReadFile("migrations/" + f)
 		if err != nil {
@@ -141,6 +137,9 @@ func openDB(file string) (*sql.DB, error) {
 		if _, err = tx.Exec(string(b)); err != nil {
 			return nil, fmt.Errorf("migration %s: %w", f, err)
 		}
+	}
+	if _, e = tx.Exec("CREATE TABLE IF NOT EXISTS shop_repository_schema (version INTEGER NOT NULL); INSERT INTO shop_repository_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema)"); e != nil {
+		return nil, e
 	}
 	if e = tx.Commit(); e != nil {
 		return nil, e
@@ -263,7 +262,7 @@ func (a *App) initializeDemo(space string) error {
 		if _, e = tx.Exec("INSERT OR IGNORE INTO station_accounts(user_id,organization_id,email,password_hash) VALUES(?,?,?,?)", id, org, p.Email, hash); e != nil {
 			return e
 		}
-		for _, s := range sites {
+		for _, s := range []string{repositorySite} {
 			if _, e = tx.Exec("INSERT OR IGNORE INTO station_grants(user_id,site,role,scope) VALUES(?,?,?,?)", id, s, p.Role, p.Scope); e != nil {
 				return e
 			}
@@ -367,6 +366,13 @@ func (a *App) auth(w http.ResponseWriter, r *http.Request) {
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ancestors := "'none'"
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	// Block other workspaces before routing, including the dedicated traffic handler.
+	for _, candidate := range sites {
+		if candidate != repositorySite && ((len(parts) > 0 && parts[0] == candidate) || (len(parts) > 2 && parts[0] == "api" && parts[1] == "stations" && parts[2] == candidate)) {
+			fail(w, http.StatusNotFound, "Workspace not found")
+			return
+		}
+	}
 	preview := r.URL.Query().Get("preview")
 	if r.Method == http.MethodGet && len(parts) == 2 && knownSite(parts[0]) && (parts[1] == "front" || parts[1] == "back") && (preview == "mobile" || preview == "workspace") {
 		ancestors = "'self'"
@@ -430,7 +436,7 @@ func main() {
 	}
 	file := os.Getenv("SUITE_DB")
 	if file == "" {
-		file = ".data/go-suite.sqlite"
+		file = ".data/shop-repository.sqlite"
 	}
 	if e := os.MkdirAll(filepath.Dir(file), 0700); e != nil {
 		log.Fatal(e)

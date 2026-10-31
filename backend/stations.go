@@ -15,12 +15,7 @@ type Dataset struct {
 }
 
 var datasets = map[string][]Dataset{
-	"mes":    {{"products", "mes_products", "Products", []string{"id", "sku", "name", "unit", "status"}}, {"workOrders", "mes_work_orders", "Work orders", []string{"id", "order_no", "product_id", "status", "target_quantity", "completed_quantity", "scrapped_quantity"}}, {"lots", "mes_material_lots", "Material lots", []string{"id", "lot_number", "material_sku", "current_quantity", "status"}}, {"reports", "mes_production_reports", "Production reports", []string{"id", "work_order_id", "good_quantity", "scrap_quantity", "created_at"}}, {"qualityChecks", "mes_quality_checks", "Quality checks", nil}, {"workCenters", "mes_work_centers", "Work centers", []string{"id", "code", "name", "status"}}, {"materials", "mes_work_order_materials", "Material movements", nil}, {"bomVersions", "mes_bom_versions", "BOM versions", nil}, {"bomItems", "mes_bom_items", "BOM items", nil}, {"downtimeEvents", "mes_downtime_events", "Downtime", nil}},
-	"erp":    {{"items", "erp_items", "Items", []string{"id", "sku", "name", "unit", "is_active"}}, {"warehouses", "erp_warehouses", "Warehouses", []string{"id", "name", "code"}}, {"stockLedger", "erp_stock_ledger", "Stock ledger", []string{"id", "item_id", "warehouse_id", "quantity_change", "created_at"}}, {"purchaseOrders", "erp_purchase_orders", "Purchase orders", nil}, {"purchaseLines", "erp_purchase_order_lines", "Purchase lines", nil}, {"salesOrders", "erp_sales_orders", "Sales orders", nil}, {"salesLines", "erp_sales_order_lines", "Sales lines", nil}, {"receipts", "erp_receipts", "Receipts", nil}, {"receiptLines", "erp_receipt_lines", "Receipt lines", nil}, {"invoices", "erp_invoices", "Receivables and payables", nil}, {"suppliers", "erp_suppliers", "Suppliers", nil}, {"customers", "erp_customers", "Customers", nil}, {"journalEntries", "erp_journal_entries", "Journal entries", nil}, {"journalLines", "erp_journal_lines", "Journal lines", nil}},
-	"pos":    {{"catalogItems", "pos_catalog_items", "Products", []string{"id", "name", "barcode", "price", "is_active"}}, {"sales", "pos_sales", "Receipts", []string{"id", "receipt_number", "total_amount", "payment_method", "created_at"}}, {"saleLines", "pos_sale_lines", "Sale lines", nil}, {"stores", "pos_stores", "Stores", []string{"id", "name", "code"}}, {"registers", "pos_registers", "Registers", []string{"id", "name", "store_id"}}, {"shifts", "pos_shifts", "Shifts", nil}, {"heldCarts", "pos_held_carts", "Held carts", nil}},
-	"crm":    {{"accounts", "crm_accounts", "Customers", nil}, {"contacts", "crm_contacts", "Contacts", nil}, {"leads", "crm_leads", "Leads", []string{"id", "name", "company", "status"}}, {"opportunities", "crm_opportunities", "Opportunities", nil}, {"activities", "crm_activities", "Activities", nil}, {"tickets", "crm_tickets", "Support tickets", []string{"id", "subject", "status", "priority", "created_at"}}, {"quotes", "crm_quotes", "Quotes", nil}, {"quoteItems", "crm_quote_items", "Quote items", nil}},
-	"dining": {{"tables", "dining_tables", "Tables", []string{"id", "table_number", "capacity", "status"}}, {"orders", "dining_orders", "Orders", []string{"id", "takeout_number", "status", "created_at"}}, {"orderItems", "dining_order_items", "Order items", nil}, {"menuItems", "dining_menu_items", "Menu", []string{"id", "name", "price", "category", "is_sold_out"}}, {"bills", "dining_bills", "Bills", nil}, {"reservations", "dining_reservations", "Reservations", nil}},
-	"shop":   {{"products", "shop_products", "Products", []string{"id", "name", "slug", "description", "is_active"}}, {"variants", "shop_variants", "Product variants", []string{"id", "product_id", "sku", "title", "price", "stock_quantity"}}, {"orders", "shop_orders", "Orders", []string{"id", "order_number", "fulfillment_status", "payment_status", "total_amount", "created_at"}}, {"items", "shop_order_items", "Order items", nil}, {"returns", "shop_returns", "Returns", nil}, {"reviews", "shop_reviews", "Reviews", nil}},
+	"shop": {{"products", "shop_products", "Products", []string{"id", "name", "slug", "description", "is_active"}}, {"variants", "shop_variants", "Product variants", []string{"id", "product_id", "sku", "title", "price", "stock_quantity"}}, {"orders", "shop_orders", "Orders", []string{"id", "order_number", "fulfillment_status", "payment_status", "total_amount", "created_at"}}, {"items", "shop_order_items", "Order items", nil}, {"returns", "shop_returns", "Returns", nil}, {"reviews", "shop_reviews", "Reviews", nil}},
 }
 
 func camel(s string) string {
@@ -96,10 +91,6 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			query := "SELECT " + columns + " FROM " + d.Table + " WHERE organization_id=?"
 			args := []any{id.OrganizationID}
-			if front && site == "pos" && d.Key == "sales" {
-				query += " AND cashier_id=?"
-				args = append(args, id.UserID)
-			}
 			if front && site == "shop" && d.Key == "orders" {
 				query += " AND user_id=?"
 				args = append(args, id.UserID)
@@ -214,11 +205,6 @@ func (a *App) manageUser(w http.ResponseWriter, r *http.Request, id *Identity, s
 type PrintKind struct{ Site, Dataset, Title, Lines, ForeignKey string }
 
 var printKinds = map[string]PrintKind{
-	"mes-lot-label": {"mes", "lots", "Material label", "", ""}, "mes-order-label": {"mes", "workOrders", "Work order label", "", ""}, "mes-order": {"mes", "workOrders", "Work orders", "mes_work_order_materials", "work_order_id"}, "mes-report": {"mes", "reports", "Production report", "", ""},
-	"erp-item-label": {"erp", "items", "Item label", "", ""}, "erp-purchase": {"erp", "purchaseOrders", "Purchase orders", "erp_purchase_order_lines", "po_id"}, "erp-sale": {"erp", "salesOrders", "Sales orders", "erp_sales_order_lines", "so_id"}, "erp-receipt": {"erp", "receipts", "Receipts", "erp_receipt_lines", "receipt_id"},
-	"pos-item-label": {"pos", "catalogItems", "Product label", "", ""}, "pos-receipt": {"pos", "sales", "Receipts", "pos_sale_lines", "sale_id"}, "pos-shift": {"pos", "shifts", "Shift report", "pos_sales", "shift_id"},
-	"crm-account-label": {"crm", "accounts", "Customer label", "", ""}, "crm-quote": {"crm", "quotes", "Customer quote", "crm_quote_items", "quote_id"},
-	"dining-menu-label": {"dining", "menuItems", "Menu item label", "", ""}, "dining-order": {"dining", "orders", "Dining order", "dining_order_items", "order_id"},
 	"shop-product-label": {"shop", "variants", "Product variant label", "", ""}, "shop-order": {"shop", "orders", "Commerce order", "shop_order_items", "order_id"},
 }
 

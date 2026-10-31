@@ -28,24 +28,15 @@ export function createSqliteD1(dbPath: string = ":memory:"): any {
   // share this local volume, so no other process may observe a partial schema.
   db.exec("BEGIN IMMEDIATE");
   try {
-    const tableCheck = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='organizations'"
-    ).get();
+    const tableCheck = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='organizations'").get();
     if (!tableCheck) {
-      const migration = path.resolve(process.cwd(), "drizzle/0000_spicy_bromley.sql");
-      if (fs.existsSync(migration)) db.exec(fs.readFileSync(migration, "utf-8"));
+      db.exec(fs.readFileSync(path.resolve(process.cwd(), "drizzle/shop_initial.sql"), "utf-8"));
+
+      db.exec("CREATE TABLE shop_vinext_schema(version INTEGER NOT NULL); INSERT INTO shop_vinext_schema VALUES (1)");
+    } else if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='shop_vinext_schema'").get()) {
+      throw new Error("Refusing existing database without shop Vinext marker; use a new database path");
     }
-    const guards = path.resolve(process.cwd(), "drizzle/0001_transaction_guards.sql");
-    if (fs.existsSync(guards)) db.exec(fs.readFileSync(guards, "utf-8"));
-    const dining = path.resolve(process.cwd(), "drizzle/0002_dining_takeout.sql");
-    if (fs.existsSync(dining)) {
-      const columns = db.prepare("PRAGMA table_info(dining_bills)").all() as Array<{ name: string }>;
-      if (!columns.some(column => column.name === "order_id")) db.exec(fs.readFileSync(dining, "utf-8"));
-    }
-    const projection = path.resolve(process.cwd(), "drizzle/0003_mes_projection.sql");
-    if (fs.existsSync(projection)) db.exec(fs.readFileSync(projection, "utf-8"));
-    const identity = path.resolve(process.cwd(), "drizzle/0004_station_identity.sql");
-    if (fs.existsSync(identity)) db.exec(fs.readFileSync(identity, "utf-8"));
+    db.exec(fs.readFileSync(path.resolve(process.cwd(), "drizzle/shop_guards.sql"), "utf-8"));
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
@@ -134,7 +125,7 @@ export function createSqliteD1(dbPath: string = ":memory:"): any {
 
 export function getLocalSqliteD1(): any {
   if (!defaultD1) {
-    const dbPath = path.resolve(process.cwd(), ".data/portfolio.sqlite");
+    const dbPath = path.resolve(process.cwd(), ".data/shop-vinext.sqlite");
     defaultD1 = createSqliteD1(dbPath);
   }
   return defaultD1;

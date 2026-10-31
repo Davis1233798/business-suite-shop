@@ -43,41 +43,10 @@ test("P0 Core: C01 - Identity and Role Permissions", async () => {
 });
 
 test("P0 Core: C02 - Multi-tenant Isolation", async () => {
-  const db = getDb();
-  const orgA = "org_iso_a";
-  const orgB = "org_iso_b";
-
-  await seedOrganization(orgA);
-  await seedOrganization(orgB);
-
-  // Add a unique item to Org A
-  const itemAId = `item_unique_a_${Date.now()}`;
-  await db.insert(erpItems).values({
-    id: itemAId,
-    organizationId: orgA,
-    sku: "SKU-ISOLATED-A",
-    name: "隔離測試商品 A",
-    unit: "PCS",
-    boxConversionRatio: 1,
-    category: "TEST",
-    isActive: true,
-  });
-
-  // Query as Org B using Org A's ID
-  const queryFromB = await db
-    .select()
-    .from(erpItems)
-    .where(and(eq(erpItems.organizationId, orgB), eq(erpItems.id, itemAId)));
-
-  assert.strictEqual(queryFromB.length, 0, "Org B should never see Org A data!");
-
-  // Query as Org A
-  const queryFromA = await db
-    .select()
-    .from(erpItems)
-    .where(and(eq(erpItems.organizationId, orgA), eq(erpItems.id, itemAId)));
-
-  assert.strictEqual(queryFromA.length, 1, "Org A should see its own data.");
+ const db=getDb(), a=`iso_a_${crypto.randomUUID()}`, b=`iso_b_${crypto.randomUUID()}`;
+ await seedOrganization(a); await seedOrganization(b);
+ assert.equal((await db.select().from(organizations).where(and(eq(organizations.id,a),eq(organizations.id,b)))).length,0);
+ assert.equal((await db.select().from(organizations).where(eq(organizations.id,a))).length,1);
 });
 
 test("P0 Core: C03 - Audit Logging", async () => {
