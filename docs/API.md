@@ -130,4 +130,9 @@
 
 ## 尚未公開的能力
 
-`lib/backup-restore.ts` 僅為 Node 測試／離線工具，三表摘要備份與獨立 SQLite 還原驗算，不是 HTTP 備份或全庫還原。`lib/export-csv.ts` 有 CSV 轉義工具，尚無報表匯出 API。Outbox 僅預留資料表，沒有對外事件交付契約。
+`lib/backup-restore.ts` 保留為舊的跨系統實驗工具；它依賴三套系統資料表，無法在目前單站資料庫運作，不應作為備份或還原方案。`lib/export-csv.ts` 有 CSV 轉義工具，尚無報表匯出 API。Outbox 僅預留資料表，沒有對外事件交付契約。
+
+
+SHOP 本機 Vinext SQLite 可透過 `node scripts/shop-snapshot.mjs backup SOURCE NEW_TARGET --confirm-plaintext` 建立完整快照；還原以 `restore` 指令複製快照到不存在的新路徑，再於停止服務後切換資料庫。工具使用 SQLite 一致性快照與完整性檢查，不覆蓋既有檔案。快照包含全部租戶及身分、稽核資料，且**未加密**，必須由有權存取本機檔案的人員保護；不適用 SQLCipher 桌面資料庫或 Cloudflare D1。
+
+快照先寫在目標目錄內的隨機暫存檔，驗證後以不覆蓋的原子硬連結發布；檔案系統不支援硬連結時會失敗。若程式遭強制中止，可能留下 `.suite-snapshot-*.tmp` 明文暫存檔，應由具權限的人員確認後安全刪除；Windows 請以資料夾 ACL 限制存取。

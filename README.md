@@ -6,15 +6,17 @@
 
 ## 本地執行與測試
 
-需要 Node.js 22.13 以上、npm 與 Go。
+需要 Node.js 22.13 以上、npm 與 Go 1.26 以上。
 
 ```powershell
 npm run install:ci
 npm run build
+# 僅限全新的空白本地 D1；不要對既有資料庫重跑
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/shop_d1_new_database.sql
 npm run dev
 ```
 
-依終端機印出的網址開啟。Vinext Node SQLite 使用 `.data/shop-vinext.sqlite`，會初始化本站資料；Go 工作站另用 `.data/shop-repository.sqlite`，兩者資料不共用。
+依終端機印出的網址開啟；若開發 Worker 所用的本機 D1 尚未初始化本站標記，會回傳 503。上述初始化與 dev 讀取已在隔離的乾淨 checkout 測試；請勿對既有 D1 直接執行新庫 SQL。Node SQLite 後備模式使用 repo 根目錄的 `.data/shop-vinext.sqlite`；Worker 使用 D1 綁定，兩者資料不共用。以下以 `go -C backend run .` 執行時，Go 工作站的預設資料庫位於 `backend/.data/shop-repository.sqlite`，與 Vinext 資料不共用。
 
 ```powershell
 npm test
@@ -30,7 +32,7 @@ Go 工作站可從 `http://127.0.0.1:8095/shop/login` 進入。Go 預設資料�
 
 ## D1 與部署
 
-`drizzle/shop_d1_new_database.sql` 僅供**新空 D1** 初始化；Worker 缺少本站標記時回傳 503。本站 bootstrap 已在隔離的本地 Wrangler D1 執行，production bundle 的本地 Worker `/api/health` 回傳 200 且顯示資料庫連線；這不涵蓋遠端 D1、業務寫入或部署。新 D1 的雲端部署與資料移轉尚未驗證。不要套用至舊資料庫、覆蓋既有 hosting identity 或直接切換正式站；先完成備份、遷移、核對及回滾計畫。
+`drizzle/shop_d1_new_database.sql` 僅供**新空 D1** 初始化；Worker 缺少本站標記時回傳 503。本站 bootstrap 已在隔離的本地 Wrangler D1 執行，production bundle 的本地 Worker `/api/health` 回傳 200 且顯示資料庫連線；並已執行本站一項代表性業務寫入及讀回；這不涵蓋遠端 D1、全部業務流程或部署。新 D1 的雲端部署與資料移轉尚未驗證。不要套用至舊資料庫、覆蓋既有 hosting identity 或直接切換正式站；先完成備份、遷移、核對及回滾計畫。
 
 ## 限制
 

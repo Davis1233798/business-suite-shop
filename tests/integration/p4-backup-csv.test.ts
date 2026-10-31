@@ -1,7 +1,5 @@
 import test from "node:test";
 import assert from "node:assert";
-import { seedOrganization } from "../../lib/seed.ts";
-import { exportTenantBackup, restoreAndVerifyBackup } from "../../lib/backup-restore.ts";
 import { sanitizeCsvField, generateCsv, formatTaipeiDate } from "../../lib/export-csv.ts";
 
 test("P4: C08 - CSV Formula Injection Safety & Taipei Timezone", () => {
