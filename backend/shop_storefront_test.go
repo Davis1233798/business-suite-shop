@@ -111,6 +111,11 @@ func TestShopStorefrontFrontProjectionAndCheckoutOwnership(t *testing.T) {
 	if len(frontData["products"]) == 0 || len(frontData["variants"]) < 2 || len(frontData["categories"]) == 0 {
 		t.Fatalf("storefront catalog projection incomplete: %#v", frontData)
 	}
+	for _, product := range frontData["products"] {
+		if product["id"] == inactiveProductID {
+			t.Fatalf("inactive product leaked into storefront catalog: %#v", product)
+		}
+	}
 	for _, variant := range frontData["variants"] {
 		if variant["id"] == inactiveVariantID || variant["productId"] == inactiveProductID {
 			t.Fatalf("inactive product variant leaked into storefront catalog: %#v", variant)
@@ -120,11 +125,10 @@ func TestShopStorefrontFrontProjectionAndCheckoutOwnership(t *testing.T) {
 	for _, variant := range frontData["variants"] {
 		if variant["id"] == variantIDs[0] {
 			available = variant["availableQuantity"] == float64(14)
-			if _, exists := variant["stockQuantity"]; exists {
-				t.Error("storefront exposed raw stockQuantity")
-			}
-			if _, exists := variant["reservedQuantity"]; exists {
-				t.Error("storefront exposed reservedQuantity")
+			for _, unnecessary := range []string{"stockQuantity", "reservedQuantity", "sku", "isActive", "organizationId"} {
+				if _, exists := variant[unnecessary]; exists {
+					t.Errorf("storefront exposed unnecessary field %s", unnecessary)
+				}
 			}
 		}
 	}
