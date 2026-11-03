@@ -30,6 +30,14 @@
 
 `POST /api/seed/reset` 無 request body，僅 admin。清除自己的領域資料後重新 seed，其他訪客空間不受影響。
 
+## Go/React Shop checkout migration slice
+
+以下路徑屬於 Go/React station runtime，使用 `suite_session` 登入工作區；需要啟用的 Shop grant 和可寫角色。售價、組織、身份、庫存與訂單金額都由伺服器決定。
+
+`POST /api/stations/shop/checkout`：`variantId`, `quantity`（1–100）、`idempotencyKey`, `customerEmail`, `shippingAddress:{name,city,address,phone}`。以可用量 `stock_quantity - reserved_quantity` 扣庫，建立 Shop 訂單／明細及 15 分鐘預留；運費為 TWD 60。相同租戶、帳號、payload 的 key 重送回原訂單；不同 payload 或帳號重用 key 回 409。過期訂單的舊 key 回 409，需重新結帳並使用新 key。預留到期目前由後續 checkout 請求釋放。
+
+`POST /api/stations/shop/checkout-lab` 僅供後台可寫角色：`{action:"prepare",capacity}` 建立 1–1000 件庫存的隔離 run；`{action:"checkout",runId,key}` 透過同一 checkout transaction 模擬並行買家。`GET /api/stations/shop/checkout-lab?runId=...` 回傳租戶範圍內的持久化訂單、明細、庫存與金額不變式，後台唯讀角色可讀取。每 run 使用暫存 SQLite DB；最多每組織 10 個、全站 100 個，30 分鐘後由下一次 lab 請求清理。付款回呼、付款記錄、出貨、退款與優惠券仍未移植到 Go。
+
 ## MES
 
 `POST /api/operations/mes` 以 `action` 分派：
