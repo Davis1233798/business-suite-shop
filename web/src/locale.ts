@@ -153,7 +153,6 @@ const traditionalChinese:Record<string,string> = {
   "Price": "價格",
   "Created": "建立時間",
   "Payment status": "付款狀態",
-  "Fulfillment status": "履約狀態",
   "Role": "角色",
   "Account": "帳號",
   "Enabled": "啟用",
