@@ -21,9 +21,9 @@ export function ShopRefunds({orders,items,returns,canWrite,onChange}:Props){
    const signature=JSON.stringify(payload);
    if(attempt.current.signature!==signature)attempt.current={signature,key:crypto.randomUUID()};
    const response=await fetch('/api/stations/shop/refund',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,idempotencyKey:attempt.current.key})});
-   const value=await response.json() as {success:boolean;data?:{refundAmount:number;orderRefundedAmount:number;duplicate:boolean};error?:{message:string}};
+   const value=await response.json() as {success:boolean;data?:{refundAmount:number;orderRefundedAmount:number;fulfillmentStatus:string;duplicate:boolean};error?:{message:string}};
    if(!response.ok||!value.success)throw new Error(value.error?.message||`HTTP ${response.status}`);
-   setNotice(`${order.orderNumber}: ${tr('Recorded simulated refund')} NT$${value.data?.refundAmount} · ${tr('Order refund total')} NT$${value.data?.orderRefundedAmount}${value.data?.duplicate?' · '+tr('Retry confirmed'):''}`);
+   setNotice(`${order.orderNumber}: ${tr('Recorded simulated refund')} NT$${value.data?.refundAmount} · ${tr('Order refund total')} NT$${value.data?.orderRefundedAmount} · ${tr('Fulfillment status')}: ${tr(value.data?.fulfillmentStatus||'')}${value.data?.duplicate?' · '+tr('Retry confirmed'):''}`);
    attempt.current={signature:'',key:''};
    setQuantity(1);
    await onChange();
@@ -32,6 +32,8 @@ export function ShopRefunds({orders,items,returns,canWrite,onChange}:Props){
  return <section className="panel" aria-label={tr('Shop return and refund operations')}>
   <h2>{tr('Simulated returns and refunds')}</h2>
   <p>{tr('Refunds are calculated from paid order item lines and exclude shipping. Returned units are added back to stock. No payment provider is contacted and no money is transferred.')}</p>
+  <p>{tr('An unshipped order with any return is put on hold because this order-level shipment flow cannot represent individual returned quantities. Returning every merchandise item cancels fulfillment; a return after shipment preserves shipped status and tracking.')}</p>
+  <p>{tr('Full merchandise returns leave payment status paid because shipping is excluded from the refund.')}</p>
   {!canWrite&&<p>{tr('Administrator role required: refund actions are disabled.')}</p>}
   <div className="form-grid">
    <label>{tr('Paid order')}<select value={orderId} disabled={busy||!canWrite} onChange={event=>{setOrderId(event.target.value);setItemId('');setQuantity(1)}}><option value="">{tr('Select an order')}</option>{paidOrders.map(row=><option key={row.id} value={row.id}>{row.orderNumber} · {row.fulfillmentStatus} · NT${row.totalAmount}</option>)}</select></label>

@@ -91,6 +91,13 @@ func createShopShipment(db *sql.DB, organizationID, actorID, actorRole string, i
 	if paymentStatus != "paid" || fulfillmentStatus != "unfulfilled" {
 		return shopShipmentResult{}, errShipmentConflict
 	}
+	var existingReturns int
+	if err = tx.QueryRow("SELECT count(*) FROM shop_returns WHERE organization_id=? AND order_id=?", organizationID, in.OrderID).Scan(&existingReturns); err != nil {
+		return shopShipmentResult{}, err
+	}
+	if existingReturns != 0 {
+		return shopShipmentResult{}, errShipmentConflict
+	}
 	var existing int
 	if err = tx.QueryRow("SELECT count(*) FROM shop_shipments WHERE organization_id=? AND order_id=?", organizationID, in.OrderID).Scan(&existing); err != nil {
 		return shopShipmentResult{}, err

@@ -69,6 +69,7 @@ func createShopRefund(db *sql.DB, organizationID, actorID, actorRole string, in 
 	if err != nil {
 		return shopRefundResult{}, err
 	}
+	originalFulfillmentStatus := fulfillmentStatus
 	var itemOrderID, variantID string
 	var originalQuantity, lineTotal int64
 	err = tx.QueryRow("SELECT order_id,variant_id,quantity,line_total FROM shop_order_items WHERE organization_id=? AND id=?", organizationID, in.OrderItemID).Scan(&itemOrderID, &variantID, &originalQuantity, &lineTotal)
@@ -161,6 +162,28 @@ func createShopRefund(db *sql.DB, organizationID, actorID, actorRole string, in 
 	if err = tx.QueryRow("SELECT COALESCE(SUM(refund_amount),0) FROM shop_returns WHERE organization_id=? AND order_id=? AND status='refunded'", organizationID, in.OrderID).Scan(&orderRefundedAmount); err != nil {
 		return shopRefundResult{}, err
 	}
+	if fulfillmentStatus == "unfulfilled" || fulfillmentStatus == "return_hold" {
+		var remainingLines int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM shop_order_items i WHERE i.organization_id=? AND i.order_id=? AND i.quantity>COALESCE((SELECT SUM(r.quantity) FROM shop_returns r WHERE r.organization_id=i.organization_id AND r.order_item_id=i.id),0)`, organizationID, in.OrderID).Scan(&remainingLines); err != nil {
+			return shopRefundResult{}, err
+		}
+		nextFulfillmentStatus := "return_hold"
+		if remainingLines == 0 {
+			nextFulfillmentStatus = "cancelled"
+		}
+		update, updateErr := tx.Exec("UPDATE shop_orders SET fulfillment_status=? WHERE organization_id=? AND id=? AND payment_status='paid' AND fulfillment_status=?", nextFulfillmentStatus, organizationID, in.OrderID, fulfillmentStatus)
+		if updateErr != nil {
+			return shopRefundResult{}, updateErr
+		}
+		changed, countErr := update.RowsAffected()
+		if countErr != nil {
+			return shopRefundResult{}, countErr
+		}
+		if changed != 1 {
+			return shopRefundResult{}, errShopRefundConflict
+		}
+		fulfillmentStatus = nextFulfillmentStatus
+	}
 	result := shopRefundResult{OrderID: in.OrderID, OrderItemID: in.OrderItemID, RefundAmount: refundAmount, RefundedQuantity: requestedQuantity, ItemRefundedQuantity: cumulativeQuantity, ItemRefundedAmount: itemRefundedAmount, OrderRefundedAmount: orderRefundedAmount, PaymentStatus: paymentStatus, FulfillmentStatus: fulfillmentStatus, TrackingNumber: trackingNumber, Simulated: true}
 	responseBody, err := json.Marshal(result)
 	if err != nil {
@@ -169,7 +192,7 @@ func createShopRefund(db *sql.DB, organizationID, actorID, actorRole string, in 
 	if _, err = tx.Exec("INSERT INTO idempotency_keys(id,organization_id,key,endpoint,request_hash,response_status,response_body) VALUES(?,?,?,'shop_refund',?,200,?)", token(), organizationID, in.Key, fingerprint, string(responseBody)); err != nil {
 		return shopRefundResult{}, err
 	}
-	before, _ := json.Marshal(map[string]any{"paymentStatus": paymentStatus, "fulfillmentStatus": fulfillmentStatus, "trackingNumber": trackingNumber, "itemRefundedQuantity": alreadyReturned})
+	before, _ := json.Marshal(map[string]any{"paymentStatus": paymentStatus, "fulfillmentStatus": originalFulfillmentStatus, "trackingNumber": trackingNumber, "itemRefundedQuantity": alreadyReturned})
 	after, _ := json.Marshal(result)
 	if _, err = tx.Exec("INSERT INTO audit_events(id,organization_id,actor_id,actor_role,action,entity_type,entity_id,before_value,after_value,reason) VALUES(?,?,?,?,?,'shop_order',?,?,?,?)", token(), organizationID, actorID, actorRole, "shop.refund.create", in.OrderID, string(before), string(after), in.Reason); err != nil {
 		return shopRefundResult{}, err

@@ -253,3 +253,163 @@ func TestShopRefundRollsBackWhenAuditWriteFails(t *testing.T) {
 		t.Fatalf("rollback left stock=%d err=%v", stock, err)
 	}
 }
+
+func TestShopFullMerchandiseRefundCancelsUnshippedOrderAndBlocksShipment(t *testing.T) {
+	a := appForTest(t)
+	space := token()
+	org := "org_test_" + space
+	admin := loginSite(t, a, "admin@suite.test", space, "shop")
+	var owner string
+	if err := a.db.QueryRow("SELECT user_id FROM station_accounts WHERE organization_id=? AND email='front@suite.test'", org).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedRefundTestOrder(t, a, org, owner, "full-cancel", "paid", "unfulfilled", 2, 1000, 0)
+	w := refundRequest(a, seed.orderID, seed.itemID, 2, "Cancel unshipped order", "refund-full-cancel-01", admin...)
+	if w.Code != http.StatusOK {
+		t.Fatalf("full merchandise refund: %d %s", w.Code, w.Body.String())
+	}
+	var refund struct {
+		Data struct {
+			RefundAmount      int64  `json:"refundAmount"`
+			PaymentStatus     string `json:"paymentStatus"`
+			FulfillmentStatus string `json:"fulfillmentStatus"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &refund); err != nil || refund.Data.RefundAmount != 1000 || refund.Data.PaymentStatus != "paid" || refund.Data.FulfillmentStatus != "cancelled" {
+		t.Fatalf("full return response=%+v err=%v", refund.Data, err)
+	}
+	var payment, fulfillment string
+	if err := a.db.QueryRow("SELECT payment_status,fulfillment_status FROM shop_orders WHERE organization_id=? AND id=?", org, seed.orderID).Scan(&payment, &fulfillment); err != nil || payment != "paid" || fulfillment != "cancelled" {
+		t.Fatalf("order state payment=%s fulfillment=%s err=%v", payment, fulfillment, err)
+	}
+	var subtotal, shippingFee, totalAmount int
+	if err := a.db.QueryRow("SELECT subtotal,shipping_fee,total_amount FROM shop_orders WHERE organization_id=? AND id=?", org, seed.orderID).Scan(&subtotal, &shippingFee, &totalAmount); err != nil || subtotal != 1000 || shippingFee != 60 || totalAmount != 1060 {
+		t.Fatalf("merchandise refund boundary subtotal=%d shipping=%d total=%d err=%v", subtotal, shippingFee, totalAmount, err)
+	}
+	ship := request(a, http.MethodPost, "/api/stations/shop/ship", map[string]any{"orderId": seed.orderID, "trackingNumber": "TRACK-BLOCKED", "carrier": "Demo carrier", "idempotencyKey": "ship-after-full-01"}, admin...)
+	if ship.Code != http.StatusConflict {
+		t.Fatalf("shipment after full merchandise refund: %d %s", ship.Code, ship.Body.String())
+	}
+	var shipmentCount int
+	if err := a.db.QueryRow("SELECT count(*) FROM shop_shipments WHERE organization_id=? AND order_id=?", org, seed.orderID).Scan(&shipmentCount); err != nil || shipmentCount != 0 {
+		t.Fatalf("shipment after full refund rows=%d err=%v", shipmentCount, err)
+	}
+}
+
+func TestShopPartialRefundHoldsUnshippedOrderAndShipmentRejectsIt(t *testing.T) {
+	a := appForTest(t)
+	space := token()
+	org := "org_test_" + space
+	admin := loginSite(t, a, "admin@suite.test", space, "shop")
+	var owner string
+	if err := a.db.QueryRow("SELECT user_id FROM station_accounts WHERE organization_id=? AND email='front@suite.test'", org).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedRefundTestOrder(t, a, org, owner, "partial-hold", "paid", "unfulfilled", 3, 1000, 0)
+	refund := refundRequest(a, seed.orderID, seed.itemID, 1, "Partial return", "refund-partial-hold-01", admin...)
+	if refund.Code != http.StatusOK {
+		t.Fatalf("partial refund: %d %s", refund.Code, refund.Body.String())
+	}
+	var result struct {
+		Data struct {
+			RefundAmount      int64  `json:"refundAmount"`
+			PaymentStatus     string `json:"paymentStatus"`
+			FulfillmentStatus string `json:"fulfillmentStatus"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(refund.Body.Bytes(), &result); err != nil || result.Data.RefundAmount != 333 || result.Data.PaymentStatus != "paid" || result.Data.FulfillmentStatus != "return_hold" {
+		t.Fatalf("partial return state=%+v err=%v", result.Data, err)
+	}
+	ship := request(a, http.MethodPost, "/api/stations/shop/ship", map[string]any{"orderId": seed.orderID, "trackingNumber": "TRACK-HOLD", "carrier": "Demo carrier", "idempotencyKey": "ship-return-hold-01"}, admin...)
+	if ship.Code != http.StatusConflict {
+		t.Fatalf("shipment after partial return: %d %s", ship.Code, ship.Body.String())
+	}
+	var shipmentCount int
+	if err := a.db.QueryRow("SELECT count(*) FROM shop_shipments WHERE organization_id=? AND order_id=?", org, seed.orderID).Scan(&shipmentCount); err != nil || shipmentCount != 0 {
+		t.Fatalf("shipment on return hold rows=%d err=%v", shipmentCount, err)
+	}
+}
+
+func TestShopShipmentRejectsLegacyReturnRowsWithoutUpdatedFulfillmentState(t *testing.T) {
+	a := appForTest(t)
+	space := token()
+	org := "org_test_" + space
+	admin := loginSite(t, a, "admin@suite.test", space, "shop")
+	var owner string
+	if err := a.db.QueryRow("SELECT user_id FROM station_accounts WHERE organization_id=? AND email='front@suite.test'", org).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedRefundTestOrder(t, a, org, owner, "legacy-partial", "paid", "unfulfilled", 2, 500, 0)
+	if _, err := a.db.Exec("INSERT INTO shop_returns(id,organization_id,order_id,order_item_id,quantity,reason,status,refund_amount) VALUES(?,?,?,?,1,'Legacy partial return','refunded',250)", "legacy-return-"+token(), org, seed.orderID, seed.itemID); err != nil {
+		t.Fatal(err)
+	}
+	ship := request(a, http.MethodPost, "/api/stations/shop/ship", map[string]any{"orderId": seed.orderID, "trackingNumber": "TRACK-LEGACY", "carrier": "Demo carrier", "idempotencyKey": "ship-legacy-return-01"}, admin...)
+	if ship.Code != http.StatusConflict {
+		t.Fatalf("shipment with legacy return row: %d %s", ship.Code, ship.Body.String())
+	}
+	var shipmentCount int
+	if err := a.db.QueryRow("SELECT count(*) FROM shop_shipments WHERE organization_id=? AND order_id=?", org, seed.orderID).Scan(&shipmentCount); err != nil || shipmentCount != 0 {
+		t.Fatalf("legacy partial return shipment rows=%d err=%v", shipmentCount, err)
+	}
+}
+
+func TestShopPartialRefundRacingShipmentHasSafeSerializedOutcome(t *testing.T) {
+	a := appForTest(t)
+	space := token()
+	org := "org_test_" + space
+	admin := loginSite(t, a, "admin@suite.test", space, "shop")
+	var owner string
+	if err := a.db.QueryRow("SELECT user_id FROM station_accounts WHERE organization_id=? AND email='front@suite.test'", org).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	seed := seedRefundTestOrder(t, a, org, owner, "refund-ship-race", "paid", "unfulfilled", 2, 1000, 0)
+	type outcome struct {
+		kind string
+		code int
+	}
+	results := make(chan outcome, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results <- outcome{kind: "refund", code: refundRequest(a, seed.orderID, seed.itemID, 1, "Concurrent partial return", "refund-ship-race-01", admin...).Code}
+	}()
+	go func() {
+		defer wg.Done()
+		response := request(a, http.MethodPost, "/api/stations/shop/ship", map[string]any{"orderId": seed.orderID, "trackingNumber": "TRACK-RACE", "carrier": "Demo carrier", "idempotencyKey": "ship-refund-race-01"}, admin...)
+		results <- outcome{kind: "shipment", code: response.Code}
+	}()
+	wg.Wait()
+	close(results)
+	refundCode, shipmentCode := 0, 0
+	for result := range results {
+		if result.kind == "refund" {
+			refundCode = result.code
+		} else {
+			shipmentCode = result.code
+		}
+	}
+	if refundCode != http.StatusOK || shipmentCode != http.StatusOK && shipmentCode != http.StatusConflict {
+		t.Fatalf("refund/shipment race: refund=%d shipment=%d", refundCode, shipmentCode)
+	}
+	var payment, fulfillment string
+	var shipmentCount, returnCount, stock int
+	if err := a.db.QueryRow("SELECT payment_status,fulfillment_status FROM shop_orders WHERE organization_id=? AND id=?", org, seed.orderID).Scan(&payment, &fulfillment); err != nil || payment != "paid" {
+		t.Fatalf("race order payment=%s fulfillment=%s err=%v", payment, fulfillment, err)
+	}
+	if err := a.db.QueryRow("SELECT count(*) FROM shop_shipments WHERE organization_id=? AND order_id=?", org, seed.orderID).Scan(&shipmentCount); err != nil || shipmentCount != 1 && shipmentCount != 0 {
+		t.Fatalf("race shipment rows=%d err=%v", shipmentCount, err)
+	}
+	if err := a.db.QueryRow("SELECT count(*) FROM shop_returns WHERE organization_id=? AND order_id=?", org, seed.orderID).Scan(&returnCount); err != nil || returnCount != 1 {
+		t.Fatalf("race return rows=%d err=%v", returnCount, err)
+	}
+	if err := a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE organization_id=? AND id=?", org, seed.variantID).Scan(&stock); err != nil || stock != 1 {
+		t.Fatalf("race stock=%d err=%v", stock, err)
+	}
+	if shipmentCode == http.StatusOK && (fulfillment != "shipped" || shipmentCount != 1) {
+		t.Fatalf("shipment won before return but state is %s with %d shipment", fulfillment, shipmentCount)
+	}
+	if shipmentCode == http.StatusConflict && (fulfillment != "return_hold" || shipmentCount != 0) {
+		t.Fatalf("return won before shipment but state is %s with %d shipment", fulfillment, shipmentCount)
+	}
+}
