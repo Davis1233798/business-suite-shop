@@ -107,8 +107,22 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "Capacity must be between 1 and 1000")
 			return
 		}
+		a.labMu.Lock()
+		a.cleanupCheckoutLabsLocked(time.Now())
+		orgCount := 0
+		for _, old := range a.checkoutLabs {
+			if old.organizationID == id.OrganizationID {
+				orgCount++
+			}
+		}
+		if orgCount >= checkoutLabMaxPerOrganization || len(a.checkoutLabs) >= checkoutLabMaxTotal {
+			a.labMu.Unlock()
+			fail(w, 429, "Checkout lab history limit reached; wait for expired runs to be cleaned")
+			return
+		}
 		db, e := openDB(":memory:")
 		if e != nil {
+			a.labMu.Unlock()
 			fail(w, 503, "Could not create isolated checkout database")
 			return
 		}
@@ -122,24 +136,11 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		if e != nil {
 			_ = db.Close()
+			a.labMu.Unlock()
 			fail(w, 503, "Could not seed isolated checkout database")
 			return
 		}
 		lab := &checkoutLab{id: run, organizationID: id.OrganizationID, variantID: variant, db: db, createdAt: time.Now(), capacity: in.Capacity}
-		a.labMu.Lock()
-		a.cleanupCheckoutLabsLocked(time.Now())
-		orgCount := 0
-		for _, old := range a.checkoutLabs {
-			if old.organizationID == id.OrganizationID {
-				orgCount++
-			}
-		}
-		if orgCount >= checkoutLabMaxPerOrganization || len(a.checkoutLabs) >= checkoutLabMaxTotal {
-			a.labMu.Unlock()
-			_ = db.Close()
-			fail(w, 429, "Checkout lab history limit reached; wait for expired runs to be cleaned")
-			return
-		}
 		a.checkoutLabs[run] = lab
 		a.labMu.Unlock()
 		time.AfterFunc(checkoutLabTTL, func() { a.cleanupCheckoutLabs(time.Now()) })
@@ -169,7 +170,7 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		a.labMu.Unlock()
 	}()
-	result, e := checkoutOrder(r.Context(), lab.db, id.OrganizationID, id.UserID, checkoutInput{VariantID: lab.variantID, Quantity: 1, Key: strings.TrimSpace(in.Key), Email: "lab@example.invalid", Address: map[string]any{"name": "Checkout lab", "address": "Isolated fixture"}})
+	result, e := checkoutOrder(r.Context(), lab.db, id.OrganizationID, id.UserID, checkoutInput{VariantID: lab.variantID, Quantity: 1, Key: strings.TrimSpace(in.Key), Email: "lab@example.invalid", Address: map[string]any{"name": "Checkout lab", "city": "Test", "address": "Isolated fixture", "phone": "0000000000"}})
 	if e == errCheckoutSoldOut {
 		ok(w, map[string]any{"outcome": "sold_out", "remaining": 0, "capacity": lab.capacity})
 		return

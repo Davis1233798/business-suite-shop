@@ -39,11 +39,11 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	if _, e := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,reserved_quantity,is_active) VALUES(?,?,?,?,?,?,2,1,1)", variant, me.Data.OrganizationID, product, "SKU-"+variant, "One unit", 725); e != nil {
 		t.Fatal(e)
 	}
-	reservedAttempt := map[string]any{"variantId": variant, "quantity": 2, "idempotencyKey": "reserved-stock-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "address": "Demo"}}
+	reservedAttempt := map[string]any{"variantId": variant, "quantity": 2, "idempotencyKey": "reserved-stock-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "city": "Taipei", "address": "Demo", "phone": "0912345678"}}
 	if w := request(a, "POST", "/api/stations/shop/checkout", reservedAttempt, admin...); w.Code != 409 {
 		t.Fatalf("checkout consumed reserved inventory: %d %s", w.Code, w.Body.String())
 	}
-	payload := map[string]any{"variantId": variant, "quantity": 1, "idempotencyKey": "checkout-route-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "address": "Demo"}}
+	payload := map[string]any{"variantId": variant, "quantity": 1, "idempotencyKey": "checkout-route-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "city": "Taipei", "address": "Demo", "phone": "0912345678"}}
 	w := request(a, "POST", "/api/stations/shop/checkout", payload, admin...)
 	if w.Code != 200 {
 		t.Fatalf("checkout: %d %s", w.Code, w.Body.String())
@@ -52,7 +52,7 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 		Data map[string]any `json:"data"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &result)
-	if result.Data["totalAmount"] != float64(725) {
+	if result.Data["totalAmount"] != float64(785) || result.Data["shippingFee"] != float64(60) {
 		t.Fatalf("checkout did not use server price: %#v", result.Data)
 	}
 	first := result.Data["orderId"]
@@ -64,7 +64,7 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	if result.Data["orderId"] != first {
 		t.Fatalf("replay created a second order: %#v", result.Data)
 	}
-	changed := map[string]any{"variantId": variant, "quantity": 2, "idempotencyKey": "checkout-route-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "address": "Demo"}}
+	changed := map[string]any{"variantId": variant, "quantity": 2, "idempotencyKey": "checkout-route-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "city": "Taipei", "address": "Demo", "phone": "0912345678"}}
 	if w = request(a, "POST", "/api/stations/shop/checkout", changed, admin...); w.Code != 409 {
 		t.Fatalf("idempotency key with changed request: %d %s", w.Code, w.Body.String())
 	}
@@ -78,11 +78,12 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	if w = request(a, "POST", "/api/stations/shop/checkout", payload, readonly...); w.Code != 403 {
 		t.Fatalf("readonly checkout: %d %s", w.Code, w.Body.String())
 	}
-	var count, stock int
+	var count, stock, reservations int
 	_ = a.db.QueryRow("SELECT count(*) FROM shop_orders WHERE organization_id=?", me.Data.OrganizationID).Scan(&count)
 	_ = a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", variant).Scan(&stock)
-	if count != baselineOrders+1 || stock != 1 {
-		t.Fatalf("orders=%d baseline=%d stock=%d", count, baselineOrders, stock)
+	_ = a.db.QueryRow("SELECT count(*) FROM shop_inventory_reservations WHERE organization_id=? AND variant_id=?", me.Data.OrganizationID, variant).Scan(&reservations)
+	if count != baselineOrders+1 || stock != 1 || reservations != 1 {
+		t.Fatalf("orders=%d baseline=%d stock=%d reservations=%d", count, baselineOrders, stock, reservations)
 	}
 }
 
@@ -183,6 +184,25 @@ func TestShopCheckoutLabExpiryClosesTemporaryDatabases(t *testing.T) {
 	}
 	if err := lab.db.Ping(); err == nil {
 		t.Fatal("expired lab database was not closed")
+	}
+}
+
+func TestShopCheckoutLabCapsRunsBeforeAllocatingMore(t *testing.T) {
+	a := appForTest(t)
+	admin := login(t, a, "admin@suite.test", token())
+	for i := 0; i < checkoutLabMaxPerOrganization; i++ {
+		w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 1}, admin...)
+		if w.Code != 200 {
+			t.Fatalf("prepare %d: %d %s", i, w.Code, w.Body.String())
+		}
+	}
+	if w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 1}, admin...); w.Code != 429 {
+		t.Fatalf("run limit: %d %s", w.Code, w.Body.String())
+	}
+	a.labMu.Lock()
+	defer a.labMu.Unlock()
+	if len(a.checkoutLabs) != checkoutLabMaxPerOrganization {
+		t.Fatalf("retained lab count=%d", len(a.checkoutLabs))
 	}
 }
 

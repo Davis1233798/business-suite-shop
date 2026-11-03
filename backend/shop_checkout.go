@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var errCheckoutInvalid = errors.New("invalid checkout request")
 var errCheckoutNotFound = errors.New("product variant not found")
 var errCheckoutSoldOut = errors.New("insufficient inventory")
 var errCheckoutIdempotency = errors.New("idempotency key was used with different checkout data")
+var checkoutEmailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 type checkoutInput struct {
 	VariantID string         `json:"variantId"`
@@ -26,14 +29,20 @@ type checkoutInput struct {
 func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID string, in checkoutInput) (map[string]any, error) {
 	in.Key = strings.TrimSpace(in.Key)
 	in.Email = strings.TrimSpace(strings.ToLower(in.Email))
-	if in.VariantID == "" || in.Quantity < 1 || in.Quantity > 100 || len(in.Key) < 1 || len(in.Key) > 128 || !strings.Contains(in.Email, "@") || len(in.Email) > 254 || len(in.Address) == 0 {
+	if in.VariantID == "" || in.Quantity < 1 || in.Quantity > 100 || len(in.Key) < 1 || len(in.Key) > 128 || !checkoutEmailPattern.MatchString(in.Email) || len(in.Email) > 254 || len(in.Address) == 0 {
 		return nil, errCheckoutInvalid
+	}
+	for _, field := range []string{"name", "city", "address", "phone"} {
+		value, ok := in.Address[field].(string)
+		if !ok || strings.TrimSpace(value) == "" || len(value) > 300 {
+			return nil, errCheckoutInvalid
+		}
 	}
 	addressBytes, err := json.Marshal(in.Address)
 	if err != nil || len(addressBytes) > 8192 {
 		return nil, errCheckoutInvalid
 	}
-	requestHash := digest(in.VariantID + "\n" + strconv.Itoa(in.Quantity) + "\n" + in.Email + "\n" + string(addressBytes))
+	requestHash := digest(userID + "\n" + in.VariantID + "\n" + strconv.Itoa(in.Quantity) + "\n" + in.Email + "\n" + string(addressBytes))
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -67,7 +76,7 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err != nil {
 		return nil, err
 	}
-	res, err := tx.Exec("UPDATE shop_variants SET stock_quantity=stock_quantity-? WHERE id=? AND organization_id=? AND is_active=1 AND stock_quantity>=?", in.Quantity, in.VariantID, organizationID, in.Quantity)
+	res, err := tx.Exec("UPDATE shop_variants SET stock_quantity=stock_quantity-? WHERE id=? AND organization_id=? AND is_active=1 AND stock_quantity-reserved_quantity>=?", in.Quantity, in.VariantID, organizationID, in.Quantity)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +89,10 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	}
 	orderID := token()
 	orderNo := "SHOP-" + orderID[:12]
-	total := price * in.Quantity
-	_, err = tx.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, orderID, organizationID, orderNo, userID, in.Email, string(addressBytes), total, 0, 0, total, "pending", "unfulfilled", in.Key)
+	subtotal := price * in.Quantity
+	shippingFee := 60
+	total := subtotal + shippingFee
+	_, err = tx.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, orderID, organizationID, orderNo, userID, in.Email, string(addressBytes), subtotal, 0, shippingFee, total, "pending", "unfulfilled", in.Key)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +100,11 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err != nil {
 		return nil, err
 	}
-	result := map[string]any{"orderId": orderID, "orderNumber": orderNo, "totalAmount": total, "unitPrice": price, "quantity": in.Quantity, "paymentStatus": "pending", "fulfillmentStatus": "unfulfilled"}
+	_, err = tx.Exec("INSERT INTO shop_inventory_reservations(id,organization_id,variant_id,session_id,cart_id,quantity,expires_at,status) VALUES(?,?,?,?,?,?,?,'active')", token(), organizationID, in.VariantID, userID, orderID, in.Quantity, time.Now().UTC().Add(15*time.Minute).Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{"orderId": orderID, "orderNumber": orderNo, "subtotal": subtotal, "shippingFee": shippingFee, "totalAmount": total, "unitPrice": price, "quantity": in.Quantity, "paymentStatus": "pending", "fulfillmentStatus": "unfulfilled"}
 	body, err := json.Marshal(result)
 	if err != nil {
 		return nil, err
