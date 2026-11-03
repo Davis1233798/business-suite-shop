@@ -73,6 +73,20 @@ func TestShopStorefrontFrontProjectionAndCheckoutOwnership(t *testing.T) {
 	if adminOrder["orderId"] == frontOrder["orderId"] {
 		t.Fatal("separate buyers unexpectedly received the same order")
 	}
+	var categoryID string
+	if err := a.db.QueryRow("SELECT p.category_id FROM shop_variants v JOIN shop_products p ON p.id=v.product_id WHERE v.id=? AND p.organization_id=?", variantIDs[0], identityEnvelope.Data.OrganizationID).Scan(&categoryID); err != nil {
+		t.Fatal(err)
+	}
+	inactiveProductID, inactiveVariantID := token(), token()
+	if _, err := a.db.Exec("INSERT INTO shop_products(id,organization_id,name,slug,description,category_id,is_active) VALUES(?,?,?,?,?,?,0)", inactiveProductID, identityEnvelope.Data.OrganizationID, "Hidden product", inactiveProductID, "Inactive parent", categoryID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,reserved_quantity,is_active) VALUES(?,?,?,?,?,100,50,0,1)", inactiveVariantID, identityEnvelope.Data.OrganizationID, inactiveProductID, inactiveVariantID, "Hidden variant"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec("UPDATE shop_variants SET reserved_quantity=4 WHERE id=? AND organization_id=?", variantIDs[0], identityEnvelope.Data.OrganizationID); err != nil {
+		t.Fatal(err)
+	}
 	if w := request(a, http.MethodPost, "/api/stations/shop/checkout", input); w.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous checkout accepted: %d", w.Code)
 	}
@@ -96,6 +110,26 @@ func TestShopStorefrontFrontProjectionAndCheckoutOwnership(t *testing.T) {
 	frontData := readFront(front)
 	if len(frontData["products"]) == 0 || len(frontData["variants"]) < 2 || len(frontData["categories"]) == 0 {
 		t.Fatalf("storefront catalog projection incomplete: %#v", frontData)
+	}
+	for _, variant := range frontData["variants"] {
+		if variant["id"] == inactiveVariantID || variant["productId"] == inactiveProductID {
+			t.Fatalf("inactive product variant leaked into storefront catalog: %#v", variant)
+		}
+	}
+	available := false
+	for _, variant := range frontData["variants"] {
+		if variant["id"] == variantIDs[0] {
+			available = variant["availableQuantity"] == float64(14)
+			if _, exists := variant["stockQuantity"]; exists {
+				t.Error("storefront exposed raw stockQuantity")
+			}
+			if _, exists := variant["reservedQuantity"]; exists {
+				t.Error("storefront exposed reservedQuantity")
+			}
+		}
+	}
+	if !available {
+		t.Fatalf("storefront did not expose stock minus reservations: %#v", frontData["variants"])
 	}
 	if len(frontData["orders"]) != 1 || frontData["orders"][0]["id"] != frontOrder["orderId"] {
 		t.Fatalf("front buyer saw orders outside their ownership: %#v", frontData["orders"])

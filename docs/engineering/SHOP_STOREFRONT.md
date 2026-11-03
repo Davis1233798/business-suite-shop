@@ -17,11 +17,11 @@ This slice does not add guest checkout, a persistent server cart, a real payment
 
 ## Acceptance cases (added before UI implementation)
 
-1. Go front identity gets only catalog projections plus its own orders and item details; sensitive order columns and another buyer's order/items are absent.
+1. Go front identity gets only active catalog projections; variant availability is computed as `stock_quantity - reserved_quantity`, raw stock/reservation fields stay private, and variants under inactive products are excluded. The buyer gets only their own orders and item details.
 2. A back-office identity using `view=front` is also limited to its own order and items; `view=back` continues to return the administrative datasets.
 3. Anonymous and disabled/no-grant identities cannot read the storefront API; a readonly account can read but checkout is rejected; a write-enabled front account can checkout.
 4. A two-variant checkout with a valid coupon creates one pending order and two item rows with server-derived totals; replaying the same key and payload returns the same order.
-5. UI review checklist: product search/category filtering, variant quantity controls, coupon and delivery details, pending order status, loading/empty/error states, and Go station API calls only. This is a review item rather than an automated test.
+5. UI review checklist: product search/category filtering, available-quantity controls, coupon and delivery details, pending order status, loading/empty/error states, and Go station API calls only. This is a review item rather than an automated test.
 
 ## Verification status
 
