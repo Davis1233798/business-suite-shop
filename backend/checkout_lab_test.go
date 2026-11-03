@@ -134,6 +134,118 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	}
 }
 
+func TestShopPaymentCallbackAuthorizationAmountReplayAndExpiryRaces(t *testing.T) {
+	a := appForTest(t)
+	space := token()
+	admin := login(t, a, "admin@suite.test", space)
+	operator := login(t, a, "office@suite.test", space)
+	readonly := login(t, a, "viewer@suite.test", space)
+	otherTenant := login(t, a, "admin@suite.test", token())
+	var identity struct {
+		Data Identity `json:"data"`
+	}
+	if w := request(a, "GET", "/api/auth/me?site=shop", nil, admin...); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	} else {
+		_ = json.Unmarshal(w.Body.Bytes(), &identity)
+	}
+	org, owner := identity.Data.OrganizationID, identity.Data.UserID
+	product, variant := token(), token()
+	category := token()
+	if _, e := a.db.Exec("INSERT INTO shop_categories(id,organization_id,name,slug) VALUES(?,?,?,?)", category, org, "Payment", "payment-"+category); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := a.db.Exec("INSERT INTO shop_products(id,organization_id,name,slug,category_id,is_active) VALUES(?,?,?,?,?,1)", product, org, "Payment", "payment-"+product, category); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,reserved_quantity,is_active) VALUES(?,?,?,?,?,725,4,0,1)", variant, org, product, "SKU-"+variant, "One"); e != nil {
+		t.Fatal(e)
+	}
+	create := func(user string, reservationExpiry string) string {
+		order := token()
+		if _, e := a.db.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, order, org, "PAY-"+order[:8], user, "buyer@example.test", `{}`, 725, 0, 60, 785, "pending", "unfulfilled"); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := a.db.Exec(`INSERT INTO shop_inventory_reservations(id,organization_id,variant_id,session_id,cart_id,quantity,expires_at,status) VALUES(?,?,?,?,?,1,?,'active')`, token(), org, variant, "shop-go-checkout:"+user, order, reservationExpiry); e != nil {
+			t.Fatal(e)
+		}
+		return order
+	}
+	order := create(owner, time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano))
+	path := "/api/stations/shop/payment/callback"
+	callback := func(reference, status string, amount int) map[string]any {
+		return map[string]any{"orderId": order, "attemptReference": reference, "amount": amount, "status": status}
+	}
+	buyer := loginSite(t, a, "front@suite.test", space, "shop")
+	if w := request(a, "POST", path, callback("front-role", "success", 785), buyer...); w.Code != 403 {
+		t.Fatalf("front-scope user: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("wrong-tenant", "success", 785), otherTenant...); w.Code != 404 {
+		t.Fatalf("other tenant: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("readonly", "success", 785), readonly...); w.Code != 403 {
+		t.Fatalf("readonly: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("other-user", "success", 785), operator...); w.Code != 404 {
+		t.Fatalf("other user order: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("wrong-amount", "success", 784), admin...); w.Code != 409 {
+		t.Fatalf("amount mismatch: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("failed-first", "failed", 785), admin...); w.Code != 200 {
+		t.Fatalf("failed callback: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("success-next", "success", 785), admin...); w.Code != 200 {
+		t.Fatalf("success after failed: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("success-next", "success", 785), admin...); w.Code != 200 {
+		t.Fatalf("exact replay: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("success-next", "failed", 785), admin...); w.Code != 409 {
+		t.Fatalf("changed replay: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(a, "POST", path, callback("failure-after-paid", "failed", 785), admin...); w.Code != 200 {
+		t.Fatalf("failed after paid: %d %s", w.Code, w.Body.String())
+	}
+	var payment, reservation string
+	_ = a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE id=?", order).Scan(&payment)
+	_ = a.db.QueryRow("SELECT status FROM shop_inventory_reservations WHERE cart_id=?", order).Scan(&reservation)
+	var attempts, paidEvents int
+	_ = a.db.QueryRow("SELECT count(*) FROM shop_payment_attempts WHERE order_id=?", order).Scan(&attempts)
+	_ = a.db.QueryRow("SELECT count(*) FROM outbox_events WHERE organization_id=? AND event_type='shop.paid' AND payload LIKE ?", org, "%"+order+"%").Scan(&paidEvents)
+	if payment != "paid" || reservation != "consumed" || attempts != 3 || paidEvents != 1 {
+		t.Fatalf("state payment=%s reservation=%s attempts=%d events=%d", payment, reservation, attempts, paidEvents)
+	}
+	// A pending order with an already expired Go reservation cannot be paid.
+	expired := create(owner, "2000-01-01T00:00:00Z")
+	if w := request(a, "POST", path, map[string]any{"orderId": expired, "attemptReference": "late-pay", "amount": 785, "status": "success"}, admin...); w.Code != 409 {
+		t.Fatalf("expired payment: %d %s", w.Code, w.Body.String())
+	}
+	var expStatus, expReservation string
+	_ = a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE id=?", expired).Scan(&expStatus)
+	_ = a.db.QueryRow("SELECT status FROM shop_inventory_reservations WHERE cart_id=?", expired).Scan(&expReservation)
+	if expStatus != "expired" || expReservation != "expired" {
+		t.Fatalf("expiry did not win: order=%s reservation=%s", expStatus, expReservation)
+	}
+	// Parallel callbacks race the expiration transaction; exactly one terminal state wins.
+	racing := create(owner, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano))
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			request(a, "POST", path, map[string]any{"orderId": tracing, "attemptReference": fmt.Sprintf("race-%d", i), "amount": 785, "status": "success"}, admin...)
+		}(i)
+	}
+	wg.Wait()
+	var raceStatus, raceReservation string
+	_ = a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE id=?", tracing).Scan(&raceStatus)
+	_ = a.db.QueryRow("SELECT status FROM shop_inventory_reservations WHERE cart_id=?", tracing).Scan(&raceReservation)
+	if raceStatus != "expired" || raceReservation != "expired" {
+		t.Fatalf("expired race became paid: order=%s reservation=%s", raceStatus, raceReservation)
+	}
+}
+
 func TestAppCloseClosesTemporaryCheckoutDatabases(t *testing.T) {
 	a := appForTest(t)
 	admin := login(t, a, "admin@suite.test", token())

@@ -861,7 +861,10 @@ CREATE TABLE `shop_payment_attempts` (
 	`provider` text DEFAULT 'mock_gateway' NOT NULL,
 	`status` text DEFAULT 'pending' NOT NULL,
 	`callback_payload` text,
-	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL
+	`actor_id` text NOT NULL DEFAULT '',
+	`actor_role` text NOT NULL DEFAULT '',
+	ctor_id text NOT NULL DEFAULT '',
+	ctor_role text NOT NULL DEFAULT ''
 );
 --> statement-breakpoint
 CREATE TABLE `shop_products` (

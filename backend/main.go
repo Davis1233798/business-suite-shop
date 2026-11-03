@@ -128,6 +128,7 @@ func openDB(file string) (*sql.DB, error) {
 		return nil, e
 	}
 	files := []string{}
+	shopSchemaVersion := 0
 	if n == 0 {
 		files = append(files, "shop_initial.sql")
 	} else {
@@ -140,8 +141,14 @@ func openDB(file string) (*sql.DB, error) {
 			db.Close()
 			return nil, fmt.Errorf("refusing existing database without shop repository marker; use a new database path")
 		}
+		if e = tx.QueryRow("SELECT version FROM shop_repository_schema LIMIT 1").Scan(&shopSchemaVersion); e != nil {
+			return nil, e
+		}
 	}
 	files = append(files, "shop_guards.sql")
+	if shopSchemaVersion < 2 {
+		files = append(files, "shop_payment_migration.sql")
+	}
 	files = append(files, "0004_station_identity.sql", "0005_traffic_lab.sql")
 	for _, f := range files {
 		b, err := migrations.ReadFile("migrations/" + f)
@@ -152,7 +159,7 @@ func openDB(file string) (*sql.DB, error) {
 			return nil, fmt.Errorf("migration %s: %w", f, err)
 		}
 	}
-	if _, e = tx.Exec("CREATE TABLE IF NOT EXISTS shop_repository_schema (version INTEGER NOT NULL); INSERT INTO shop_repository_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema)"); e != nil {
+	if _, e = tx.Exec("CREATE TABLE IF NOT EXISTS shop_repository_schema (version INTEGER NOT NULL); INSERT INTO shop_repository_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema); UPDATE shop_repository_schema SET version=2 WHERE version<2"); e != nil {
 		return nil, e
 	}
 	if e = tx.Commit(); e != nil {
@@ -416,6 +423,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("/api/auth/{action}", a.auth)
 	mux.HandleFunc("/api/stations/{site}/traffic", a.trafficAPI)
 	mux.HandleFunc("/api/stations/{site}/checkout", a.shopCheckoutAPI)
+	mux.HandleFunc("/api/stations/{site}/payment/callback", a.shopPaymentCallbackAPI)
 	mux.HandleFunc("/api/stations/{site}/checkout-lab", a.checkoutLabAPI)
 	mux.HandleFunc("/api/stations/{site}/{action}", a.stationAPI)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

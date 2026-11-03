@@ -258,6 +258,8 @@ export const shopPaymentAttempts = sqliteTable("shop_payment_attempts", {
   provider: text("provider").notNull().default("mock_gateway"),
   status: text("status").notNull().default("pending"), // pending, success, failed, timed_out
   callbackPayload: text("callback_payload"),
+  actorId: text("actor_id").notNull().default(""),
+  actorRole: text("actor_role").notNull().default(""),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
