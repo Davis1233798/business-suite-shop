@@ -219,6 +219,24 @@ func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
 	if accepted != 5 || duplicates == 0 || soldOut == 0 {
 		t.Fatalf("accepted=%d duplicate=%d soldout=%d", accepted, duplicates, soldOut)
 	}
+	var summary struct {
+		Data struct {
+			Orders     int  `json:"orders"`
+			Items      int  `json:"items"`
+			Units      int  `json:"units"`
+			Stock      int  `json:"stock"`
+			Capacity   int  `json:"capacity"`
+			Consistent bool `json:"consistent"`
+		} `json:"data"`
+	}
+	if w := request(a, "GET", "/api/stations/shop/checkout-lab?runId="+prepared.Data.RunID, nil, admin...); w.Code != 200 {
+		t.Fatalf("summary: %d %s", w.Code, w.Body.String())
+	} else if e := json.Unmarshal(w.Body.Bytes(), &summary); e != nil {
+		t.Fatal(e)
+	}
+	if !summary.Data.Consistent || summary.Data.Orders != 5 || summary.Data.Items != 5 || summary.Data.Units != 5 || summary.Data.Stock != 0 || summary.Data.Capacity != 5 {
+		t.Fatalf("server summary invariant: %#v", summary.Data)
+	}
 	var orders int
 	if e := a.db.QueryRow("SELECT count(*) FROM shop_orders").Scan(&orders); e != nil || orders != baselineOrders {
 		t.Fatalf("lab contaminated workspace orders=%d baseline=%d err=%v", orders, baselineOrders, e)
@@ -293,9 +311,10 @@ func TestShopCheckoutLabCapsRunsBeforeAllocatingMore(t *testing.T) {
 
 func TestShopCheckoutLabPermissionAndTenantIsolation(t *testing.T) {
 	a := appForTest(t)
-	admin := login(t, a, "admin@suite.test", token())
+	space := token()
+	admin := login(t, a, "admin@suite.test", space)
 	other := login(t, a, "admin@suite.test", token())
-	viewer := login(t, a, "viewer@suite.test", token())
+	viewer := loginSite(t, a, "viewer@suite.test", space, "shop")
 	w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 2}, admin...)
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
@@ -306,6 +325,15 @@ func TestShopCheckoutLabPermissionAndTenantIsolation(t *testing.T) {
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &d)
+	if w = request(a, "GET", "/api/stations/shop/checkout-lab?runId="+d.Data.RunID, nil, other...); w.Code != 404 {
+		t.Fatalf("cross-tenant summary: %d", w.Code)
+	}
+	if w = request(a, "GET", "/api/stations/shop/checkout-lab?runId="+d.Data.RunID, nil, viewer...); w.Code != 200 {
+		t.Fatalf("readonly summary: %d %s", w.Code, w.Body.String())
+	}
+	if w = request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 2}, viewer...); w.Code != 403 {
+		t.Fatalf("readonly start: %d", w.Code)
+	}
 	if w = request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "checkout", "runId": d.Data.RunID, "key": "x"}, other...); w.Code != 404 {
 		t.Fatalf("cross tenant: %d", w.Code)
 	}
