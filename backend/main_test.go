@@ -16,8 +16,9 @@ func appForTest(t *testing.T) *App {
 	if e != nil {
 		t.Fatal(e)
 	}
-	t.Cleanup(func() { db.Close() })
-	return &App{db: db}
+	a := &App{db: db}
+	t.Cleanup(func() { _ = a.Close() })
+	return a
 }
 func request(a *App, method, path string, input any, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(input)

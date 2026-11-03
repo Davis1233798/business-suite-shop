@@ -143,7 +143,6 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		lab := &checkoutLab{id: run, organizationID: id.OrganizationID, variantID: variant, db: db, createdAt: time.Now(), capacity: in.Capacity}
 		a.checkoutLabs[run] = lab
 		a.labMu.Unlock()
-		time.AfterFunc(checkoutLabTTL, func() { a.cleanupCheckoutLabs(time.Now()) })
 		ok(w, map[string]any{"runId": run, "capacity": in.Capacity, "unitPrice": 100})
 		return
 	}

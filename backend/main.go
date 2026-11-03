@@ -33,6 +33,17 @@ type App struct {
 	labMu        sync.Mutex
 	checkoutLabs map[string]*checkoutLab
 }
+
+func (a *App) Close() error {
+	a.labMu.Lock()
+	for id, lab := range a.checkoutLabs {
+		_ = lab.db.Close()
+		delete(a.checkoutLabs, id)
+	}
+	a.labMu.Unlock()
+	return a.db.Close()
+}
+
 type Grant struct {
 	Site    string `json:"site"`
 	Role    string `json:"role"`
@@ -450,20 +461,23 @@ func main() {
 	if e != nil {
 		log.Fatal(e)
 	}
-	defer db.Close()
 	assets := os.Getenv("SUITE_WEB")
 	if assets == "" {
 		assets = "../web-dist"
 	}
+	app := &App{db: db, assets: assets}
+	defer app.Close()
 	addr := os.Getenv("SUITE_ADDR")
 	if addr == "" {
 		addr = "127.0.0.1:8095"
 	}
-	server := &http.Server{Addr: addr, Handler: &App{db: db, assets: assets}, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
+	server := &http.Server{Addr: addr, Handler: app, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	listener, e := net.Listen("tcp", addr)
 	if e != nil {
 		log.Fatal(e)
 	}
 	log.Printf("Go business-suite ready at %s", listener.Addr().String())
-	log.Fatal(server.Serve(listener))
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
 }

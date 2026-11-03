@@ -107,6 +107,44 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	if releasedStock != 2 || reservationStatus != "expired" || expiredPayment != "expired" {
 		t.Fatalf("reservation release stock=%d status=%s payment=%s", releasedStock, reservationStatus, expiredPayment)
 	}
+	legacyOrder, legacyReservation := token(), token()
+	if _, e := a.db.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, legacyOrder, me.Data.OrganizationID, "LEGACY-"+legacyOrder[:8], me.Data.UserID, "legacy@example.test", `{}`, 100, 0, 0, 100, "pending", "unfulfilled"); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := a.db.Exec(`INSERT INTO shop_inventory_reservations(id,organization_id,variant_id,session_id,cart_id,quantity,expires_at,status) VALUES(?,?,?,?,?,?,?,'active')`, legacyReservation, me.Data.OrganizationID, variant, "legacy-cart-session", legacyOrder, 1, "2000-01-01T00:00:00Z"); e != nil {
+		t.Fatal(e)
+	}
+	if e := releaseExpiredShopReservations(a.db, me.Data.OrganizationID, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	_ = a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", variant).Scan(&releasedStock)
+	_ = a.db.QueryRow("SELECT status FROM shop_inventory_reservations WHERE id=?", legacyReservation).Scan(&reservationStatus)
+	_ = a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE id=?", legacyOrder).Scan(&expiredPayment)
+	if releasedStock != 2 || reservationStatus != "active" || expiredPayment != "pending" {
+		t.Fatalf("legacy reservation changed: stock=%d status=%s payment=%s", releasedStock, reservationStatus, expiredPayment)
+	}
+}
+
+func TestAppCloseClosesTemporaryCheckoutDatabases(t *testing.T) {
+	a := appForTest(t)
+	admin := login(t, a, "admin@suite.test", token())
+	w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 1}, admin...)
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	var d struct {
+		Data struct {
+			RunID string `json:"runId"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &d)
+	lab := a.checkoutLabForTest(d.Data.RunID)
+	if e := a.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if e := lab.db.Ping(); e == nil {
+		t.Fatal("application shutdown retained isolated lab database")
+	}
 }
 
 func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
@@ -212,14 +250,30 @@ func TestShopCheckoutLabExpiryClosesTemporaryDatabases(t *testing.T) {
 func TestShopCheckoutLabCapsRunsBeforeAllocatingMore(t *testing.T) {
 	a := appForTest(t)
 	admin := login(t, a, "admin@suite.test", token())
-	for i := 0; i < checkoutLabMaxPerOrganization; i++ {
-		w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 1}, admin...)
-		if w.Code != 200 {
-			t.Fatalf("prepare %d: %d %s", i, w.Code, w.Body.String())
+	codes := make(chan int, 16)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 1}, admin...)
+			codes <- w.Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	created, rejected := 0, 0
+	for code := range codes {
+		if code == 200 {
+			created++
+		} else if code == 429 {
+			rejected++
+		} else {
+			t.Fatalf("unexpected prepare status %d", code)
 		}
 	}
-	if w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 1}, admin...); w.Code != 429 {
-		t.Fatalf("run limit: %d %s", w.Code, w.Body.String())
+	if created != checkoutLabMaxPerOrganization || rejected != 16-checkoutLabMaxPerOrganization {
+		t.Fatalf("concurrent prepare created=%d rejected=%d", created, rejected)
 	}
 	a.labMu.Lock()
 	defer a.labMu.Unlock()

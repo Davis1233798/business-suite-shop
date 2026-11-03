@@ -18,7 +18,7 @@ func releaseExpiredShopReservations(db *sql.DB, organizationID string, now time.
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT r.id,r.variant_id,r.quantity,r.cart_id,COALESCE(o.payment_status,'') FROM shop_inventory_reservations r LEFT JOIN shop_orders o ON o.id=r.cart_id AND o.organization_id=r.organization_id WHERE r.organization_id=? AND r.status='active' AND datetime(r.expires_at)<=datetime(?)`, organizationID, now.UTC().Format(time.RFC3339Nano))
+	rows, err := tx.Query(`SELECT r.id,r.variant_id,r.quantity,r.cart_id,COALESCE(o.payment_status,'') FROM shop_inventory_reservations r LEFT JOIN shop_orders o ON o.id=r.cart_id AND o.organization_id=r.organization_id WHERE r.organization_id=? AND r.session_id LIKE 'shop-go-checkout:%' AND r.status='active' AND datetime(r.expires_at)<=datetime(?)`, organizationID, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -159,7 +159,7 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec("INSERT INTO shop_inventory_reservations(id,organization_id,variant_id,session_id,cart_id,quantity,expires_at,status) VALUES(?,?,?,?,?,?,?,'active')", token(), organizationID, in.VariantID, userID, orderID, in.Quantity, time.Now().UTC().Add(15*time.Minute).Format(time.RFC3339Nano))
+	_, err = tx.Exec("INSERT INTO shop_inventory_reservations(id,organization_id,variant_id,session_id,cart_id,quantity,expires_at,status) VALUES(?,?,?,?,?,?,?,'active')", token(), organizationID, in.VariantID, "shop-go-checkout:"+userID, orderID, in.Quantity, time.Now().UTC().Add(15*time.Minute).Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +175,6 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	time.AfterFunc(15*time.Minute, func() { _ = releaseExpiredShopReservations(db, organizationID, time.Now()) })
 	return result, nil
 }
 
