@@ -8,6 +8,61 @@ import (
 	"testing"
 )
 
+func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
+	a := appForTest(t)
+	admin := login(t, a, "admin@suite.test", token())
+	var me struct {
+		Data Identity `json:"data"`
+	}
+	if w := request(a, "GET", "/api/auth/me?site=shop", nil, admin...); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	} else {
+		_ = json.Unmarshal(w.Body.Bytes(), &me)
+	}
+	product, variant := token(), token()
+	if _, e := a.db.Exec("INSERT INTO shop_categories(id,organization_id,name,slug) VALUES(?,?,?,?)", token(), me.Data.OrganizationID, "Checkout", "checkout-"+product); e != nil {
+		t.Fatal(e)
+	}
+	category := "checkout-" + product
+	var categoryID string
+	if e := a.db.QueryRow("SELECT id FROM shop_categories WHERE organization_id=? AND slug=?", me.Data.OrganizationID, category).Scan(&categoryID); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := a.db.Exec("INSERT INTO shop_products(id,organization_id,name,slug,description,category_id,is_active) VALUES(?,?,?,?,?,?,1)", product, me.Data.OrganizationID, "Server priced", "product-"+product, "", categoryID); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,is_active) VALUES(?,?,?,?,?,?,2,1)", variant, me.Data.OrganizationID, product, "SKU-"+variant, "One unit", 725); e != nil {
+		t.Fatal(e)
+	}
+	payload := map[string]any{"variantId": variant, "quantity": 1, "idempotencyKey": "checkout-route-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "address": "Demo"}}
+	w := request(a, "POST", "/api/stations/shop/checkout", payload, admin...)
+	if w.Code != 200 {
+		t.Fatalf("checkout: %d %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Data map[string]any `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Data["totalAmount"] != float64(725) {
+		t.Fatalf("checkout did not use server price: %#v", result.Data)
+	}
+	first := result.Data["orderId"]
+	w = request(a, "POST", "/api/stations/shop/checkout", payload, admin...)
+	if w.Code != 200 {
+		t.Fatalf("idempotent replay: %d %s", w.Code, w.Body.String())
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Data["orderId"] != first {
+		t.Fatalf("replay created a second order: %#v", result.Data)
+	}
+	var count, stock int
+	_ = a.db.QueryRow("SELECT count(*) FROM shop_orders WHERE organization_id=?", me.Data.OrganizationID).Scan(&count)
+	_ = a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", variant).Scan(&stock)
+	if count != 1 || stock != 1 {
+		t.Fatalf("orders=%d stock=%d", count, stock)
+	}
+}
+
 func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
 	a := appForTest(t)
 	admin := login(t, a, "admin@suite.test", token())
@@ -68,12 +123,39 @@ func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
 		t.Fatalf("accepted=%d duplicate=%d soldout=%d", accepted, duplicates, soldOut)
 	}
 	var orders int
-	if e := a.db.QueryRow("SELECT count(*) FROM shop_orders o JOIN shop_checkout_lab_runs r ON r.organization_id=o.organization_id JOIN shop_checkout_lab_orders l ON l.order_id=o.id WHERE r.id=?", prepared.Data.RunID).Scan(&orders); e != nil || orders != 5 {
-		t.Fatalf("real order count=%d err=%v", orders, e)
+	if e := a.db.QueryRow("SELECT count(*) FROM shop_orders").Scan(&orders); e != nil || orders != 0 {
+		t.Fatalf("lab contaminated workspace orders=%d err=%v", orders, e)
+	}
+	lab := a.checkoutLabForTest(prepared.Data.RunID)
+	if e := lab.db.QueryRow("SELECT count(*) FROM shop_orders").Scan(&orders); e != nil || orders != 5 {
+		t.Fatalf("isolated real order count=%d err=%v", orders, e)
 	}
 	var stock int
-	if e := a.db.QueryRow("SELECT v.stock_quantity FROM shop_variants v JOIN shop_checkout_lab_runs r ON r.variant_id=v.id WHERE r.id=?", prepared.Data.RunID).Scan(&stock); e != nil || stock != 0 {
-		t.Fatalf("remaining stock=%d err=%v", stock, e)
+	if e := lab.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", lab.variantID).Scan(&stock); e != nil || stock != 0 {
+		t.Fatalf("isolated remaining stock=%d err=%v", stock, e)
+	}
+}
+
+func TestShopCheckoutLabExpiryClosesTemporaryDatabases(t *testing.T) {
+	a := appForTest(t)
+	admin := login(t, a, "admin@suite.test", token())
+	w := request(a, "POST", "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 1}, admin...)
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	var d struct {
+		Data struct {
+			RunID string `json:"runId"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &d)
+	lab := a.checkoutLabForTest(d.Data.RunID)
+	a.cleanupCheckoutLabs(lab.createdAt.Add(checkoutLabTTL + 1))
+	if _, ok := a.checkoutLabForTestMaybe(d.Data.RunID); ok {
+		t.Fatal("expired lab database was retained")
+	}
+	if err := lab.db.Ping(); err == nil {
+		t.Fatal("expired lab database was not closed")
 	}
 }
 
