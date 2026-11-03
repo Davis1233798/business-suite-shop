@@ -19,7 +19,7 @@ func TestShopShipmentAuthorizationPaidOnlyAndIdempotency(t *testing.T) {
 	front := loginSite(t, a, "front@suite.test", space, "shop")
 	otherTenant := loginSite(t, a, "admin@suite.test", token(), "shop")
 	var customerID string
-	if err := a.db.QueryRow("SELECT id FROM users WHERE organization_id=? AND email='front@suite.test'", org).Scan(&customerID); err != nil {
+	if err := a.db.QueryRow("SELECT user_id FROM station_accounts WHERE organization_id=? AND email='front@suite.test'", org).Scan(&customerID); err != nil {
 		t.Fatal(err)
 	}
 	seedOrder := func(name, payment, fulfillment string) string {
@@ -108,7 +108,7 @@ func TestShopShipmentConcurrentRequestsCreateOneShipment(t *testing.T) {
 	org := "org_test_" + space
 	admin := loginSite(t, a, "admin@suite.test", space, "shop")
 	var owner string
-	if err := a.db.QueryRow("SELECT id FROM users WHERE organization_id=? AND email='front@suite.test'", org).Scan(&owner); err != nil {
+	if err := a.db.QueryRow("SELECT user_id FROM station_accounts WHERE organization_id=? AND email='front@suite.test'", org).Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
 	orderID := "shipment-race-" + token()
