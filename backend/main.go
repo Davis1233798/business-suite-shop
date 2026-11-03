@@ -426,6 +426,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("/api/stations/{site}/checkout", a.shopCheckoutAPI)
 	mux.HandleFunc("/api/stations/{site}/payment/callback", a.shopPaymentCallbackAPI)
 	mux.HandleFunc("/api/stations/{site}/ship", a.shopShipmentAPI)
+	mux.HandleFunc("/api/stations/{site}/refund", a.shopRefundAPI)
 	mux.HandleFunc("/api/stations/{site}/checkout-lab", a.checkoutLabAPI)
 	mux.HandleFunc("/api/stations/{site}/{action}", a.stationAPI)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
