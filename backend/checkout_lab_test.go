@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
@@ -84,6 +85,26 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	_ = a.db.QueryRow("SELECT count(*) FROM shop_inventory_reservations WHERE organization_id=? AND variant_id=?", me.Data.OrganizationID, variant).Scan(&reservations)
 	if count != baselineOrders+1 || stock != 1 || reservations != 1 {
 		t.Fatalf("orders=%d baseline=%d stock=%d reservations=%d", count, baselineOrders, stock, reservations)
+	}
+	var lineTotal, subtotal, shippingFee, total int
+	if e := a.db.QueryRow(`SELECT i.line_total,o.subtotal,o.shipping_fee,o.total_amount FROM shop_order_items i JOIN shop_orders o ON o.id=i.order_id WHERE i.order_id=?`, first).Scan(&lineTotal, &subtotal, &shippingFee, &total); e != nil {
+		t.Fatal(e)
+	}
+	if lineTotal != 725 || subtotal != 725 || shippingFee != 60 || total != 785 {
+		t.Fatalf("line/order totals line=%d subtotal=%d shipping=%d total=%d", lineTotal, subtotal, shippingFee, total)
+	}
+	if _, e := a.db.Exec("UPDATE shop_inventory_reservations SET expires_at=? WHERE variant_id=?", "2000-01-01T00:00:00Z", variant); e != nil {
+		t.Fatal(e)
+	}
+	if e := releaseExpiredShopReservations(a.db, me.Data.OrganizationID, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	var releasedStock int
+	var reservationStatus string
+	_ = a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", variant).Scan(&releasedStock)
+	_ = a.db.QueryRow("SELECT status FROM shop_inventory_reservations WHERE variant_id=?", variant).Scan(&reservationStatus)
+	if releasedStock != 2 || reservationStatus != "expired" {
+		t.Fatalf("reservation release stock=%d status=%s", releasedStock, reservationStatus)
 	}
 }
 
