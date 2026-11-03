@@ -107,6 +107,15 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	if releasedStock != 2 || reservationStatus != "expired" || expiredPayment != "expired" {
 		t.Fatalf("reservation release stock=%d status=%s payment=%s", releasedStock, reservationStatus, expiredPayment)
 	}
+	if w = request(a, "POST", "/api/stations/shop/checkout", payload, admin...); w.Code != 409 {
+		t.Fatalf("expired checkout replay must conflict: %d %s", w.Code, w.Body.String())
+	}
+	var postExpiryOrders int
+	_ = a.db.QueryRow("SELECT count(*) FROM shop_orders WHERE organization_id=?", me.Data.OrganizationID).Scan(&postExpiryOrders)
+	_ = a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", variant).Scan(&releasedStock)
+	if postExpiryOrders != baselineOrders+1 || releasedStock != 2 {
+		t.Fatalf("expired replay changed order/stock: orders=%d stock=%d", postExpiryOrders, releasedStock)
+	}
 	legacyOrder, legacyReservation := token(), token()
 	if _, e := a.db.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, legacyOrder, me.Data.OrganizationID, "LEGACY-"+legacyOrder[:8], me.Data.UserID, "legacy@example.test", `{}`, 100, 0, 0, 100, "pending", "unfulfilled"); e != nil {
 		t.Fatal(e)
