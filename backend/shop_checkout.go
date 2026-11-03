@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -212,7 +213,12 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	var oldHash, oldBody string
 	err = tx.QueryRow("SELECT request_hash,response_body FROM idempotency_keys WHERE organization_id=? AND key=? AND endpoint='shop_checkout'", organizationID, in.Key).Scan(&oldHash, &oldBody)
 	if err == nil {
-		if oldHash != requestHash {
+		legacyHashMatches := false
+		if legacySingleLine && in.CouponCode == "" {
+			legacyHash := digest(userID + "\n" + in.VariantID + "\n" + strconv.Itoa(in.Quantity) + "\n" + in.Email + "\n" + string(addressBytes))
+			legacyHashMatches = oldHash == legacyHash
+		}
+		if oldHash != requestHash && !legacyHashMatches {
 			return nil, errCheckoutIdempotency
 		}
 		var result map[string]any

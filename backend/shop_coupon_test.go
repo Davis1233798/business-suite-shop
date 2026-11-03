@@ -10,6 +10,8 @@ import (
 
 type couponTestCatalog struct {
 	orgID    string
+	userID   string
+	space    string
 	admin    []*http.Cookie
 	variantA string
 	variantB string
@@ -46,7 +48,7 @@ func seedCouponTestCatalog(t *testing.T, a *App) couponTestCatalog {
 			t.Fatal(err)
 		}
 	}
-	return couponTestCatalog{orgID: org, admin: admin, variantA: variants[0], variantB: variants[1]}
+	return couponTestCatalog{orgID: org, userID: me.Data.UserID, space: space, admin: admin, variantA: variants[0], variantB: variants[1]}
 }
 
 func addCouponTestPromotion(t *testing.T, a *App, org, code, kind string, value, minSpend int, expires any, active int) {
@@ -62,6 +64,57 @@ func couponCheckout(a *App, cookies []*http.Cookie, key, code string, items ...m
 		"customerEmail":   "buyer@example.test",
 		"shippingAddress": map[string]string{"name": "Buyer", "city": "Taipei", "address": "Demo", "phone": "0912345678"},
 	}, cookies...)
+}
+
+func TestShopCheckoutReplaysLegacySingleItemIdempotencyFingerprint(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+	orderID, orderNo, key := "legacy-order-"+token(), "LEGACY-"+token()[:12], "legacy-checkout-key"
+	address := map[string]any{"name": "Buyer", "city": "Taipei", "address": "Demo", "phone": "0912345678"}
+	addressBytes, err := json.Marshal(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status,idempotency_key) VALUES(?,?,?,?,?,?,100,0,60,160,'pending','unfulfilled',?)`, orderID, catalog.orgID, orderNo, catalog.userID, "buyer@example.test", string(addressBytes), key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Exec("INSERT INTO shop_order_items(id,organization_id,order_id,variant_id,product_name,variant_title,sku,unit_price,quantity,line_total) VALUES(?,?,?,?,?,?,?,?,1,100)", "legacy-item-"+token(), catalog.orgID, orderID, catalog.variantA, "Coupon product", "Variant", "legacy-sku", 100); err != nil {
+		t.Fatal(err)
+	}
+	legacyHash := digest(catalog.userID + "\n" + catalog.variantA + "\n1\n" + "buyer@example.test" + "\n" + string(addressBytes))
+	legacyBody, err := json.Marshal(map[string]any{"orderId": orderID, "orderNumber": orderNo, "subtotal": 100, "shippingFee": 60, "totalAmount": 160, "unitPrice": 100, "quantity": 1, "paymentStatus": "pending"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Exec("INSERT INTO idempotency_keys(id,organization_id,key,endpoint,request_hash,response_status,response_body) VALUES(?,?,?,'shop_checkout',?,200,?)", "legacy-idem-"+token(), catalog.orgID, key, legacyHash, string(legacyBody)); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{"variantId": catalog.variantA, "quantity": 1, "idempotencyKey": key, "customerEmail": "buyer@example.test", "shippingAddress": address}
+	w := request(a, http.MethodPost, "/api/stations/shop/checkout", payload, catalog.admin...)
+	if w.Code != http.StatusOK {
+		t.Fatalf("legacy exact replay: %d %s", w.Code, w.Body.String())
+	}
+	var replay struct {
+		Data struct {
+			OrderID   string `json:"orderId"`
+			Duplicate bool   `json:"duplicate"`
+		} `json:"data"`
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &replay); err != nil || replay.Data.OrderID != orderID || !replay.Data.Duplicate {
+		t.Fatalf("legacy replay=%+v err=%v", replay.Data, err)
+	}
+	changed := map[string]any{"variantId": catalog.variantA, "quantity": 2, "idempotencyKey": key, "customerEmail": "buyer@example.test", "shippingAddress": address}
+	if w = request(a, http.MethodPost, "/api/stations/shop/checkout", changed, catalog.admin...); w.Code != http.StatusConflict {
+		t.Fatalf("legacy key with changed quantity: %d %s", w.Code, w.Body.String())
+	}
+	withCoupon := map[string]any{"variantId": catalog.variantA, "quantity": 1, "couponCode": "SAVE10", "idempotencyKey": key, "customerEmail": "buyer@example.test", "shippingAddress": address}
+	if w = request(a, http.MethodPost, "/api/stations/shop/checkout", withCoupon, catalog.admin...); w.Code != http.StatusConflict {
+		t.Fatalf("legacy key with added coupon: %d %s", w.Code, w.Body.String())
+	}
+	otherUser := loginSite(t, a, "office@suite.test", catalog.space, "shop")
+	if w = request(a, http.MethodPost, "/api/stations/shop/checkout", payload, otherUser...); w.Code != http.StatusConflict {
+		t.Fatalf("legacy key with different actor: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func TestShopCouponCheckoutPricesOnServerAndRefundsDiscountedLineAmounts(t *testing.T) {
@@ -146,7 +199,7 @@ func TestShopCouponBoundsExpiryTenantAndInvalidPromotions(t *testing.T) {
 	addCouponTestPromotion(t, a, catalog.orgID, "MINIMUM", "fixed", 500, 200, nil, 1)
 	addCouponTestPromotion(t, a, catalog.orgID, "EXPIRED", "fixed", 20, 0, "2000-01-01 00:00:00", 1)
 	addCouponTestPromotion(t, a, catalog.orgID, "DISABLED", "percentage", 10, 0, nil, 0)
-	addCouponTestPromotion(t, foreign.orgID, "FOREIGN", "fixed", 1, 0, nil, 1)
+	addCouponTestPromotion(t, a, foreign.orgID, "FOREIGN", "fixed", 1, 0, nil, 1)
 	for _, tc := range []struct {
 		name string
 		code string
