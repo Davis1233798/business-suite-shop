@@ -228,7 +228,7 @@ func TestShopPaymentCallbackAuthorizationAmountReplayAndExpiryRaces(t *testing.T
 		t.Fatalf("expiry did not win: order=%s reservation=%s", expStatus, expReservation)
 	}
 	// Parallel callbacks race the expiration transaction; exactly one terminal state wins.
-	racing := create(owner, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano))
+	tracing := create(owner, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano))
 	var wg sync.WaitGroup
 	for i := 0; i < 12; i++ {
 		wg.Add(1)
