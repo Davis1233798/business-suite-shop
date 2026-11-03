@@ -72,6 +72,7 @@ var errCheckoutInvalid = errors.New("invalid checkout request")
 var errCheckoutNotFound = errors.New("product variant not found")
 var errCheckoutSoldOut = errors.New("insufficient inventory")
 var errCheckoutIdempotency = errors.New("idempotency key was used with different checkout data")
+var errCheckoutExpired = errors.New("checkout expired; submit a new checkout with a new idempotency key")
 var checkoutEmailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
 type checkoutInput struct {
@@ -117,6 +118,18 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 		if json.Unmarshal([]byte(oldBody), &result) != nil {
 			return nil, errors.New("stored checkout response is invalid")
 		}
+		orderID, ok := result["orderId"].(string)
+		if !ok {
+			return nil, errors.New("stored checkout order is invalid")
+		}
+		var paymentStatus string
+		if err = tx.QueryRow("SELECT payment_status FROM shop_orders WHERE id=? AND organization_id=?", orderID, organizationID).Scan(&paymentStatus); err != nil {
+			return nil, err
+		}
+		if paymentStatus == "expired" {
+			return nil, errCheckoutExpired
+		}
+		result["paymentStatus"] = paymentStatus
 		result["duplicate"] = true
 		if err = tx.Commit(); err != nil {
 			return nil, err
@@ -218,6 +231,8 @@ func (a *App) shopCheckoutAPI(w http.ResponseWriter, r *http.Request) {
 	case errCheckoutSoldOut:
 		fail(w, 409, err.Error())
 	case errCheckoutIdempotency:
+		fail(w, 409, err.Error())
+	case errCheckoutExpired:
 		fail(w, 409, err.Error())
 	default:
 		fail(w, 503, "Checkout transaction failed")
