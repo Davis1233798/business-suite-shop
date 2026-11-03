@@ -129,6 +129,7 @@ func openDB(file string) (*sql.DB, error) {
 	}
 	files := []string{}
 	shopSchemaVersion := 0
+	freshShopDatabase := n == 0
 	if n == 0 {
 		files = append(files, "shop_initial.sql")
 	} else {
@@ -146,7 +147,7 @@ func openDB(file string) (*sql.DB, error) {
 		}
 	}
 	files = append(files, "shop_guards.sql")
-	if shopSchemaVersion < 2 {
+	if !freshShopDatabase && shopSchemaVersion < 2 {
 		files = append(files, "shop_payment_migration.sql")
 	}
 	files = append(files, "0004_station_identity.sql", "0005_traffic_lab.sql")

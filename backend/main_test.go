@@ -20,6 +20,46 @@ func appForTest(t *testing.T) *App {
 	t.Cleanup(func() { _ = a.Close() })
 	return a
 }
+
+func TestShopPaymentSchemaSupportsFreshUpgradeAndReopen(t *testing.T) {
+	fresh, err := openDB(filepath.Join(t.TempDir(), "fresh.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fresh.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	legacy, err := openDB(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = legacy.Exec("ALTER TABLE shop_payment_attempts RENAME COLUMN actor_id TO old_actor_id"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = legacy.Exec("ALTER TABLE shop_payment_attempts RENAME COLUMN actor_role TO old_actor_role; UPDATE shop_repository_schema SET version=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err = legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := openDB(legacyPath)
+	if err != nil {
+		t.Fatalf("upgrade v1 schema: %v", err)
+	}
+	if err = upgraded.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openDB(legacyPath)
+	if err != nil {
+		t.Fatalf("reopen upgraded schema: %v", err)
+	}
+	defer reopened.Close()
+	var version int
+	if err = reopened.QueryRow("SELECT version FROM shop_repository_schema").Scan(&version); err != nil || version != 2 {
+		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+}
 func request(a *App, method, path string, input any, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(input)
 	r := httptest.NewRequest(method, "http://localhost"+path, bytes.NewReader(b))
