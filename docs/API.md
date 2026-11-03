@@ -36,6 +36,8 @@
 
 `POST /api/stations/shop/checkout`：`variantId`, `quantity`（1–100）、`idempotencyKey`, `customerEmail`, `shippingAddress:{name,city,address,phone}`。以可用量 `stock_quantity - reserved_quantity` 扣庫，建立 Shop 訂單／明細及 15 分鐘預留；運費為 TWD 60。相同租戶、帳號、payload 的 key 重送回原訂單；不同 payload 或帳號重用 key 回 409。過期訂單的舊 key 回 409，需重新結帳並使用新 key。預留到期目前由後續 checkout 請求釋放。
 
+`POST /api/stations/shop/payment`：`orderId`, `attemptReference`, `amount`, `status`（`success`／`failed`）。這是供移植流程驗收的模擬付款回呼，必須由該訂單擁有者或同租戶後台管理員提交；金額必須精確符合訂單。付款嘗試、付款狀態、成功扣定預留及 `shop.paid` outbox 事件在同一交易提交。相同參考值及相同內容可冪等重送，參考值重用於不同內容會回 409。過期釋放與付款轉態競爭時，以資料庫交易序列化，過期訂單不得轉為已付款。此 API 不驗證第三方簽章，也不代表已串接真實金流。
+
 `POST /api/stations/shop/checkout-lab` 僅供後台可寫角色：`{action:"prepare",capacity}` 建立 1–1000 件庫存的隔離 run；`{action:"checkout",runId,key}` 透過同一 checkout transaction 模擬並行買家。`GET /api/stations/shop/checkout-lab?runId=...` 回傳租戶範圍內的持久化訂單、明細、庫存與金額不變式，後台唯讀角色可讀取。每 run 使用暫存 SQLite DB；最多每組織 10 個、全站 100 個，30 分鐘後由下一次 lab 請求清理。付款回呼、付款記錄、出貨、退款與優惠券仍未移植到 Go。
 
 ## MES
