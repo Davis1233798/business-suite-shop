@@ -12,6 +12,62 @@ import (
 	"time"
 )
 
+func releaseExpiredShopReservations(db *sql.DB, organizationID string, now time.Time) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT r.id,r.variant_id,r.quantity,r.cart_id,COALESCE(o.payment_status,'') FROM shop_inventory_reservations r LEFT JOIN shop_orders o ON o.id=r.cart_id AND o.organization_id=r.organization_id WHERE r.organization_id=? AND r.status='active' AND datetime(r.expires_at)<=datetime(?)`, organizationID, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	type expiredReservation struct {
+		id, variant, orderID, payment string
+		quantity                      int
+	}
+	expired := []expiredReservation{}
+	for rows.Next() {
+		var item expiredReservation
+		if err = rows.Scan(&item.id, &item.variant, &item.quantity, &item.orderID, &item.payment); err != nil {
+			rows.Close()
+			return err
+		}
+		expired = append(expired, item)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, item := range expired {
+		status := "expired"
+		if item.payment == "paid" {
+			status = "consumed"
+		}
+		res, e := tx.Exec("UPDATE shop_inventory_reservations SET status=? WHERE id=? AND organization_id=? AND status='active'", status, item.id, organizationID)
+		if e != nil {
+			return e
+		}
+		changed, e := res.RowsAffected()
+		if e != nil {
+			return e
+		}
+		if changed != 1 {
+			continue
+		}
+		if item.payment == "pending" || item.payment == "failed" {
+			if _, e = tx.Exec("UPDATE shop_variants SET stock_quantity=stock_quantity+? WHERE id=? AND organization_id=?", item.quantity, item.variant, organizationID); e != nil {
+				return e
+			}
+			if _, e = tx.Exec("UPDATE shop_orders SET payment_status='expired' WHERE id=? AND organization_id=? AND payment_status IN ('pending','failed')", item.orderID, organizationID); e != nil {
+				return e
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 var errCheckoutInvalid = errors.New("invalid checkout request")
 var errCheckoutNotFound = errors.New("product variant not found")
 var errCheckoutSoldOut = errors.New("insufficient inventory")
@@ -27,6 +83,9 @@ type checkoutInput struct {
 }
 
 func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID string, in checkoutInput) (map[string]any, error) {
+	if err := releaseExpiredShopReservations(db, organizationID, time.Now()); err != nil {
+		return nil, err
+	}
 	in.Key = strings.TrimSpace(in.Key)
 	in.Email = strings.TrimSpace(strings.ToLower(in.Email))
 	if in.VariantID == "" || in.Quantity < 1 || in.Quantity > 100 || len(in.Key) < 1 || len(in.Key) > 128 || !checkoutEmailPattern.MatchString(in.Email) || len(in.Email) > 254 || len(in.Address) == 0 {
@@ -96,7 +155,7 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(`INSERT INTO shop_order_items(id,organization_id,order_id,variant_id,product_name,variant_title,sku,unit_price,quantity,line_total) VALUES(?,?,?,?,?,?,?,?,?,?)`, token(), organizationID, orderID, in.VariantID, productName, title, sku, price, in.Quantity, total)
+	_, err = tx.Exec(`INSERT INTO shop_order_items(id,organization_id,order_id,variant_id,product_name,variant_title,sku,unit_price,quantity,line_total) VALUES(?,?,?,?,?,?,?,?,?,?)`, token(), organizationID, orderID, in.VariantID, productName, title, sku, price, in.Quantity, subtotal)
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +175,7 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	time.AfterFunc(15*time.Minute, func() { _ = releaseExpiredShopReservations(db, organizationID, time.Now()) })
 	return result, nil
 }
 

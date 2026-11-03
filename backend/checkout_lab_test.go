@@ -100,11 +100,12 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 		t.Fatal(e)
 	}
 	var releasedStock int
-	var reservationStatus string
+	var reservationStatus, expiredPayment string
 	_ = a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", variant).Scan(&releasedStock)
 	_ = a.db.QueryRow("SELECT status FROM shop_inventory_reservations WHERE variant_id=?", variant).Scan(&reservationStatus)
-	if releasedStock != 2 || reservationStatus != "expired" {
-		t.Fatalf("reservation release stock=%d status=%s", releasedStock, reservationStatus)
+	_ = a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE id=?", first).Scan(&expiredPayment)
+	if releasedStock != 2 || reservationStatus != "expired" || expiredPayment != "expired" {
+		t.Fatalf("reservation release stock=%d status=%s payment=%s", releasedStock, reservationStatus, expiredPayment)
 	}
 }
 
