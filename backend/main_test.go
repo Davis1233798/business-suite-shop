@@ -37,7 +37,7 @@ func TestShopPaymentSchemaSupportsFreshUpgradeAndReopen(t *testing.T) {
 	if _, err = legacy.Exec("ALTER TABLE shop_payment_attempts RENAME COLUMN actor_id TO old_actor_id"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = legacy.Exec("ALTER TABLE shop_payment_attempts RENAME COLUMN actor_role TO old_actor_role; UPDATE shop_repository_schema SET version=1"); err != nil {
+	if _, err = legacy.Exec("ALTER TABLE shop_payment_attempts RENAME COLUMN actor_role TO old_actor_role; ALTER TABLE shop_orders DROP COLUMN coupon_code; UPDATE shop_repository_schema SET version=1"); err != nil {
 		t.Fatal(err)
 	}
 	if err = legacy.Close(); err != nil {
@@ -56,7 +56,7 @@ func TestShopPaymentSchemaSupportsFreshUpgradeAndReopen(t *testing.T) {
 	}
 	defer reopened.Close()
 	var version int
-	if err = reopened.QueryRow("SELECT version FROM shop_repository_schema").Scan(&version); err != nil || version != 2 {
+	if err = reopened.QueryRow("SELECT version FROM shop_repository_schema").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 }

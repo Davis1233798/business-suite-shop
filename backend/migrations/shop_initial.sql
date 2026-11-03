@@ -109,6 +109,7 @@ CREATE TABLE `shop_orders` (
 	`order_number` text NOT NULL,
 	`user_id` text,
 	`customer_email` text NOT NULL,
+	`coupon_code` text,
 	`shipping_address_json` text NOT NULL,
 	`subtotal` integer NOT NULL,
 	`discount_amount` integer DEFAULT 0 NOT NULL,

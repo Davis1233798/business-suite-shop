@@ -34,9 +34,9 @@
 
 以下路徑屬於 Go/React station runtime，使用 `suite_session` 登入工作區；需要啟用的 Shop grant 和可寫角色。售價、組織、身份、庫存與訂單金額都由伺服器決定。
 
-`POST /api/stations/shop/checkout`：`variantId`, `quantity`（1–100）、`idempotencyKey`, `customerEmail`, `shippingAddress:{name,city,address,phone}`。以可用量 `stock_quantity - reserved_quantity` 扣庫，建立 Shop 訂單／明細及 15 分鐘預留；運費為 TWD 60。相同租戶、帳號、payload 的 key 重送回原訂單；不同 payload 或帳號重用 key 回 409。過期訂單的舊 key 回 409，需重新結帳並使用新 key。預留到期目前由後續 checkout 請求釋放。
+`POST /api/stations/shop/checkout`：`items:[{variantId,quantity}]`（1–50 種規格，各 1–999 件），或為舊用戶保留的 `variantId` + `quantity`（1–100），另含 `idempotencyKey`, `customerEmail`, `shippingAddress:{name,city,address,phone}` 及可選 `couponCode`。售價、租戶、折扣和應付金額均由伺服器計算；優惠券按該租戶的啟用狀態、到期時間和商品小計最低門檻驗證。百分比沿用 legacy 四捨五入，固定/百分比折扣都不會超過商品小計；一張券只適用一次且不與其他券併用。運費沿用 legacy 固定 TWD 60，沒有免運門檻。商品折扣依行小計比例分配，尾行吸收整數餘數，訂單明細持久化折後金額，退款依明細折後金額與退貨數量比例計算。優惠券不設核銷次數上限（既有 promotion schema 無此欄位）。以可用量 `stock_quantity - reserved_quantity` 扣庫，建立 Shop 訂單／明細及 15 分鐘預留；相同租戶、帳號、購物車、地址和券碼的 key 重送回原訂單；不同 payload、券碼或帳號重用 key 回 409。過期訂單的舊 key 回 409，需重新結帳並使用新 key。預留到期目前由後續 checkout 請求釋放。
 
-`POST /api/stations/shop/checkout-lab` 僅供後台可寫角色：`{action:"prepare",capacity}` 建立 1–1000 件庫存的隔離 run；`{action:"checkout",runId,key}` 透過同一 checkout transaction 模擬並行買家。`GET /api/stations/shop/checkout-lab?runId=...` 回傳租戶範圍內的持久化訂單、明細、庫存與金額不變式，後台唯讀角色可讀取。每 run 使用暫存 SQLite DB；最多每組織 10 個、全站 100 個，30 分鐘後由下一次 lab 請求清理。付款回呼、付款記錄、出貨、退款與優惠券仍未移植到 Go。
+`POST /api/stations/shop/checkout-lab` 僅供後台可寫角色：`{action:"prepare",capacity}` 建立 1–1000 件庫存的隔離 run；`{action:"checkout",runId,key}` 透過同一 checkout transaction 模擬並行買家。`GET /api/stations/shop/checkout-lab?runId=...` 回傳租戶範圍內的持久化訂單、明細、庫存與金額不變式，後台唯讀角色可讀取。每 run 使用暫存 SQLite DB；最多每組織 10 個、全站 100 個，30 分鐘後由下一次 lab 請求清理。付款回呼、付款記錄、出貨與退款仍未移植到 Go。
 
 ## MES
 

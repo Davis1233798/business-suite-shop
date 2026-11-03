@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"net/http"
 	"regexp"
-	"strconv"
+	"sort"
 	"strings"
 	"time"
 )
@@ -73,14 +74,84 @@ var errCheckoutNotFound = errors.New("product variant not found")
 var errCheckoutSoldOut = errors.New("insufficient inventory")
 var errCheckoutIdempotency = errors.New("idempotency key was used with different checkout data")
 var errCheckoutExpired = errors.New("checkout expired; submit a new checkout with a new idempotency key")
+var errCheckoutCoupon = errors.New("coupon is invalid, expired, inactive, or below its minimum spend")
 var checkoutEmailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 
+type checkoutItemInput struct {
+	VariantID string `json:"variantId"`
+	Quantity  int    `json:"quantity"`
+}
+
 type checkoutInput struct {
-	VariantID string         `json:"variantId"`
-	Quantity  int            `json:"quantity"`
-	Key       string         `json:"idempotencyKey"`
-	Email     string         `json:"customerEmail"`
-	Address   map[string]any `json:"shippingAddress"`
+	VariantID  string              `json:"variantId"`
+	Quantity   int                 `json:"quantity"`
+	Items      []checkoutItemInput `json:"items"`
+	CouponCode string              `json:"couponCode"`
+	Key        string              `json:"idempotencyKey"`
+	Email      string              `json:"customerEmail"`
+	Address    map[string]any      `json:"shippingAddress"`
+}
+
+type checkoutResolvedLine struct {
+	variantID, productName, title, sku string
+	quantity                           int
+	unitPrice, rawLineTotal, lineTotal int64
+}
+
+func parseShopCouponExpiry(value string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05", "2006-01-02"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, errors.New("invalid coupon expiry")
+}
+
+func shopCouponDiscount(tx *sql.Tx, organizationID, code string, subtotal int64, now time.Time) (int64, error) {
+	if code == "" {
+		return 0, nil
+	}
+	var kind string
+	var value, minSpend int64
+	var expires sql.NullString
+	var active int
+	err := tx.QueryRow("SELECT discount_type,discount_value,min_spend,expires_at,is_active FROM shop_promotions WHERE organization_id=? AND code=?", organizationID, code).Scan(&kind, &value, &minSpend, &expires, &active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, errCheckoutCoupon
+	}
+	if err != nil {
+		return 0, err
+	}
+	if active != 1 || minSpend < 0 || subtotal < minSpend || value < 0 {
+		return 0, errCheckoutCoupon
+	}
+	if expires.Valid && strings.TrimSpace(expires.String) != "" {
+		deadline, parseErr := parseShopCouponExpiry(strings.TrimSpace(expires.String))
+		if parseErr != nil || !deadline.After(now) {
+			return 0, errCheckoutCoupon
+		}
+	}
+	var discount int64
+	switch kind {
+	case "percentage":
+		var product, round big.Int
+		product.Mul(big.NewInt(subtotal), big.NewInt(value))
+		round.Add(&product, big.NewInt(50)) // legacy Math.round for non-negative currency values
+		round.Quo(&round, big.NewInt(100))
+		if round.Cmp(big.NewInt(subtotal)) > 0 {
+			discount = subtotal
+		} else {
+			discount = round.Int64()
+		}
+	case "fixed":
+		discount = value
+	default:
+		return 0, errCheckoutCoupon
+	}
+	if discount > subtotal {
+		discount = subtotal
+	}
+	return discount, nil
 }
 
 func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID string, in checkoutInput) (map[string]any, error) {
@@ -89,7 +160,17 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	}
 	in.Key = strings.TrimSpace(in.Key)
 	in.Email = strings.TrimSpace(strings.ToLower(in.Email))
-	if in.VariantID == "" || in.Quantity < 1 || in.Quantity > 100 || len(in.Key) < 1 || len(in.Key) > 128 || !checkoutEmailPattern.MatchString(in.Email) || len(in.Email) > 254 || len(in.Address) == 0 {
+	in.CouponCode = strings.TrimSpace(in.CouponCode)
+	legacySingleLine := len(in.Items) == 0 && in.VariantID != ""
+	if legacySingleLine && (in.Quantity < 1 || in.Quantity > 100) {
+		return nil, errCheckoutInvalid
+	}
+	if legacySingleLine {
+		in.Items = []checkoutItemInput{{VariantID: in.VariantID, Quantity: in.Quantity}}
+	} else if len(in.Items) > 0 && (in.VariantID != "" || in.Quantity != 0) {
+		return nil, errCheckoutInvalid
+	}
+	if len(in.Items) < 1 || len(in.Items) > 50 || len(in.Key) < 1 || len(in.Key) > 128 || len(in.CouponCode) > 80 || !checkoutEmailPattern.MatchString(in.Email) || len(in.Email) > 254 || len(in.Address) == 0 {
 		return nil, errCheckoutInvalid
 	}
 	for _, field := range []string{"name", "city", "address", "phone"} {
@@ -102,7 +183,27 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err != nil || len(addressBytes) > 8192 {
 		return nil, errCheckoutInvalid
 	}
-	requestHash := digest(userID + "\n" + in.VariantID + "\n" + strconv.Itoa(in.Quantity) + "\n" + in.Email + "\n" + string(addressBytes))
+	quantities := make(map[string]int, len(in.Items))
+	for _, item := range in.Items {
+		if !paymentReferencePattern.MatchString(item.VariantID) || item.Quantity < 1 || item.Quantity > 999 || quantities[item.VariantID] > 999-item.Quantity {
+			return nil, errCheckoutInvalid
+		}
+		quantities[item.VariantID] += item.Quantity
+	}
+	canonicalItems := make([]checkoutItemInput, 0, len(quantities))
+	for variantID, quantity := range quantities {
+		canonicalItems = append(canonicalItems, checkoutItemInput{VariantID: variantID, Quantity: quantity})
+	}
+	sort.Slice(canonicalItems, func(i, j int) bool { return canonicalItems[i].VariantID < canonicalItems[j].VariantID })
+	requestPayload, err := json.Marshal(struct {
+		UserID, Email, Coupon string
+		Items                 []checkoutItemInput
+		Address               json.RawMessage
+	}{userID, in.Email, in.CouponCode, canonicalItems, addressBytes})
+	if err != nil {
+		return nil, errCheckoutInvalid
+	}
+	requestHash := digest(string(requestPayload))
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -139,44 +240,83 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 	if err != sql.ErrNoRows {
 		return nil, err
 	}
-	var productName, title, sku string
-	var price int
-	err = tx.QueryRow(`SELECT p.name,v.title,v.sku,v.price FROM shop_variants v JOIN shop_products p ON p.id=v.product_id WHERE v.id=? AND v.organization_id=? AND v.is_active=1 AND p.organization_id=? AND p.is_active=1`, in.VariantID, organizationID, organizationID).Scan(&productName, &title, &sku, &price)
-	if err == sql.ErrNoRows {
-		return nil, errCheckoutNotFound
+	lines := make([]checkoutResolvedLine, 0, len(canonicalItems))
+	var subtotal int64
+	for _, item := range canonicalItems {
+		line := checkoutResolvedLine{variantID: item.VariantID, quantity: item.Quantity}
+		err = tx.QueryRow(`SELECT p.name,v.title,v.sku,v.price FROM shop_variants v JOIN shop_products p ON p.id=v.product_id WHERE v.id=? AND v.organization_id=? AND v.is_active=1 AND p.organization_id=? AND p.is_active=1`, item.VariantID, organizationID, organizationID).Scan(&line.productName, &line.title, &line.sku, &line.unitPrice)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errCheckoutNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		if line.unitPrice < 0 || line.unitPrice > (1<<63-1)/int64(item.Quantity) {
+			return nil, errCheckoutInvalid
+		}
+		line.rawLineTotal = line.unitPrice * int64(item.Quantity)
+		if subtotal > (1<<63-1)-line.rawLineTotal {
+			return nil, errCheckoutInvalid
+		}
+		subtotal += line.rawLineTotal
+		lines = append(lines, line)
 	}
+	couponDiscount, err := shopCouponDiscount(tx, organizationID, in.CouponCode, subtotal, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
-	res, err := tx.Exec("UPDATE shop_variants SET stock_quantity=stock_quantity-? WHERE id=? AND organization_id=? AND is_active=1 AND stock_quantity-reserved_quantity>=?", in.Quantity, in.VariantID, organizationID, in.Quantity)
-	if err != nil {
-		return nil, err
+	netSubtotal := subtotal - couponDiscount
+	shippingFee := int64(60) // legacy Shop pricing is fixed NT$60; it has no free-shipping threshold.
+	if netSubtotal > (1<<63-1)-shippingFee {
+		return nil, errCheckoutInvalid
 	}
-	changed, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
+	total := netSubtotal + shippingFee
+	allocated := int64(0)
+	for i := range lines {
+		share := int64(0)
+		if i == len(lines)-1 {
+			share = couponDiscount - allocated
+		} else if subtotal > 0 {
+			var product big.Int
+			product.Mul(big.NewInt(lines[i].rawLineTotal), big.NewInt(couponDiscount))
+			product.Quo(&product, big.NewInt(subtotal))
+			share = product.Int64()
+			allocated += share
+		}
+		lines[i].lineTotal = lines[i].rawLineTotal - share
 	}
-	if changed != 1 {
-		return nil, errCheckoutSoldOut
+	for _, line := range lines {
+		res, updateErr := tx.Exec("UPDATE shop_variants SET stock_quantity=stock_quantity-? WHERE id=? AND organization_id=? AND is_active=1 AND stock_quantity-reserved_quantity>=?", line.quantity, line.variantID, organizationID, line.quantity)
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		changed, updateErr := res.RowsAffected()
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		if changed != 1 {
+			return nil, errCheckoutSoldOut
+		}
 	}
 	orderID := token()
 	orderNo := "SHOP-" + orderID[:12]
-	subtotal := price * in.Quantity
-	shippingFee := 60
-	total := subtotal + shippingFee
-	_, err = tx.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, orderID, organizationID, orderNo, userID, in.Email, string(addressBytes), subtotal, 0, shippingFee, total, "pending", "unfulfilled", in.Key)
+	_, err = tx.Exec(`INSERT INTO shop_orders(id,organization_id,order_number,user_id,customer_email,coupon_code,shipping_address_json,subtotal,discount_amount,shipping_fee,total_amount,payment_status,fulfillment_status,idempotency_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, orderID, organizationID, orderNo, userID, in.Email, nullableCoupon(in.CouponCode), string(addressBytes), subtotal, couponDiscount, shippingFee, total, "pending", "unfulfilled", in.Key)
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(`INSERT INTO shop_order_items(id,organization_id,order_id,variant_id,product_name,variant_title,sku,unit_price,quantity,line_total) VALUES(?,?,?,?,?,?,?,?,?,?)`, token(), organizationID, orderID, in.VariantID, productName, title, sku, price, in.Quantity, subtotal)
-	if err != nil {
-		return nil, err
+	for _, line := range lines {
+		if _, err = tx.Exec(`INSERT INTO shop_order_items(id,organization_id,order_id,variant_id,product_name,variant_title,sku,unit_price,quantity,line_total) VALUES(?,?,?,?,?,?,?,?,?,?)`, token(), organizationID, orderID, line.variantID, line.productName, line.title, line.sku, line.unitPrice, line.quantity, line.lineTotal); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec("INSERT INTO shop_inventory_reservations(id,organization_id,variant_id,session_id,cart_id,quantity,expires_at,status) VALUES(?,?,?,?,?,?,?,'active')", token(), organizationID, line.variantID, "shop-go-checkout:"+userID, orderID, line.quantity, time.Now().UTC().Add(15*time.Minute).Format(time.RFC3339Nano)); err != nil {
+			return nil, err
+		}
 	}
-	_, err = tx.Exec("INSERT INTO shop_inventory_reservations(id,organization_id,variant_id,session_id,cart_id,quantity,expires_at,status) VALUES(?,?,?,?,?,?,?,'active')", token(), organizationID, in.VariantID, "shop-go-checkout:"+userID, orderID, in.Quantity, time.Now().UTC().Add(15*time.Minute).Format(time.RFC3339Nano))
-	if err != nil {
-		return nil, err
+	result := map[string]any{"orderId": orderID, "orderNumber": orderNo, "subtotal": subtotal, "discountAmount": couponDiscount, "couponCode": in.CouponCode, "shippingFee": shippingFee, "totalAmount": total, "paymentStatus": "pending", "fulfillmentStatus": "unfulfilled", "duplicate": false}
+	if len(lines) == 1 {
+		result["unitPrice"] = lines[0].unitPrice
+		result["quantity"] = lines[0].quantity
 	}
-	result := map[string]any{"orderId": orderID, "orderNumber": orderNo, "subtotal": subtotal, "shippingFee": shippingFee, "totalAmount": total, "unitPrice": price, "quantity": in.Quantity, "paymentStatus": "pending", "fulfillmentStatus": "unfulfilled"}
 	body, err := json.Marshal(result)
 	if err != nil {
 		return nil, err
@@ -189,6 +329,13 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 		return nil, err
 	}
 	return result, nil
+}
+
+func nullableCoupon(code string) any {
+	if code == "" {
+		return nil
+	}
+	return code
 }
 
 func (a *App) shopCheckoutAPI(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +380,8 @@ func (a *App) shopCheckoutAPI(w http.ResponseWriter, r *http.Request) {
 	case errCheckoutIdempotency:
 		fail(w, 409, err.Error())
 	case errCheckoutExpired:
+		fail(w, 409, err.Error())
+	case errCheckoutCoupon:
 		fail(w, 409, err.Error())
 	default:
 		fail(w, 503, "Checkout transaction failed")

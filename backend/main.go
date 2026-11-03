@@ -150,6 +150,9 @@ func openDB(file string) (*sql.DB, error) {
 	if !freshShopDatabase && shopSchemaVersion < 2 {
 		files = append(files, "shop_payment_migration.sql")
 	}
+	if !freshShopDatabase && shopSchemaVersion < 3 {
+		files = append(files, "shop_coupon_migration.sql")
+	}
 	files = append(files, "0004_station_identity.sql", "0005_traffic_lab.sql")
 	for _, f := range files {
 		b, err := migrations.ReadFile("migrations/" + f)
@@ -160,7 +163,7 @@ func openDB(file string) (*sql.DB, error) {
 			return nil, fmt.Errorf("migration %s: %w", f, err)
 		}
 	}
-	if _, e = tx.Exec("CREATE TABLE IF NOT EXISTS shop_repository_schema (version INTEGER NOT NULL); INSERT INTO shop_repository_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema); UPDATE shop_repository_schema SET version=2 WHERE version<2"); e != nil {
+	if _, e = tx.Exec("CREATE TABLE IF NOT EXISTS shop_repository_schema (version INTEGER NOT NULL); INSERT INTO shop_repository_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema); UPDATE shop_repository_schema SET version=3 WHERE version<3"); e != nil {
 		return nil, e
 	}
 	if e = tx.Commit(); e != nil {
