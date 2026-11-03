@@ -36,8 +36,12 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	if _, e := a.db.Exec("INSERT INTO shop_products(id,organization_id,name,slug,description,category_id,is_active) VALUES(?,?,?,?,?,?,1)", product, me.Data.OrganizationID, "Server priced", "product-"+product, "", categoryID); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,is_active) VALUES(?,?,?,?,?,?,2,1)", variant, me.Data.OrganizationID, product, "SKU-"+variant, "One unit", 725); e != nil {
+	if _, e := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,reserved_quantity,is_active) VALUES(?,?,?,?,?,?,2,1,1)", variant, me.Data.OrganizationID, product, "SKU-"+variant, "One unit", 725); e != nil {
 		t.Fatal(e)
+	}
+	reservedAttempt := map[string]any{"variantId": variant, "quantity": 2, "idempotencyKey": "reserved-stock-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "address": "Demo"}}
+	if w := request(a, "POST", "/api/stations/shop/checkout", reservedAttempt, admin...); w.Code != 409 {
+		t.Fatalf("checkout consumed reserved inventory: %d %s", w.Code, w.Body.String())
 	}
 	payload := map[string]any{"variantId": variant, "quantity": 1, "idempotencyKey": "checkout-route-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "address": "Demo"}}
 	w := request(a, "POST", "/api/stations/shop/checkout", payload, admin...)
@@ -66,6 +70,9 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	}
 	if w = request(a, "POST", "/api/stations/shop/checkout", payload, login(t, a, "admin@suite.test", token())...); w.Code != 404 {
 		t.Fatalf("cross-organization variant checkout: %d %s", w.Code, w.Body.String())
+	}
+	if w = request(a, "POST", "/api/stations/shop/checkout", payload, loginSite(t, a, "office@suite.test", space, "shop")...); w.Code != 409 {
+		t.Fatalf("same-organization other-user replay: %d %s", w.Code, w.Body.String())
 	}
 	readonly := loginSite(t, a, "viewer@suite.test", space, "shop")
 	if w = request(a, "POST", "/api/stations/shop/checkout", payload, readonly...); w.Code != 403 {
