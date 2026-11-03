@@ -72,10 +72,6 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Checkout lab is unavailable")
 		return
 	}
-	if r.Method != http.MethodPost {
-		fail(w, 405, "Use POST")
-		return
-	}
 	id, err := a.identity(r)
 	if err != nil {
 		fail(w, 401, "Sign in to use checkout lab")
@@ -87,11 +83,46 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if g.Role == "readonly" {
-		fail(w, 403, "A write-enabled role is required")
-		return
+		if r.Method != http.MethodGet {
+			fail(w, 403, "A write-enabled role is required")
+			return
+		}
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	a.cleanupCheckoutLabs(time.Now())
+	if r.Method == http.MethodGet {
+		runID := r.URL.Query().Get("runId")
+		a.labMu.Lock()
+		lab := a.checkoutLabs[runID]
+		if lab != nil && lab.organizationID == id.OrganizationID {
+			lab.active++
+		}
+		a.labMu.Unlock()
+		if lab == nil || lab.organizationID != id.OrganizationID {
+			fail(w, 404, "Checkout run not found in this workspace")
+			return
+		}
+		defer func() {
+			a.labMu.Lock()
+			lab.active--
+			if lab.active == 0 && time.Since(lab.createdAt) >= checkoutLabTTL {
+				_ = lab.db.Close()
+				delete(a.checkoutLabs, lab.id)
+			}
+			a.labMu.Unlock()
+		}()
+		data, err := checkoutLabSummary(lab)
+		if err != nil {
+			fail(w, 503, "Could not read checkout run evidence")
+			return
+		}
+		ok(w, data)
+		return
+	}
+	if r.Method != http.MethodPost {
+		fail(w, 405, "Use GET or POST")
+		return
+	}
 	var in struct {
 		Action   string `json:"action"`
 		RunID    string `json:"runId"`
@@ -191,4 +222,37 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		result["outcome"] = "duplicate"
 	}
 	ok(w, result)
+}
+
+func checkoutLabSummary(lab *checkoutLab) (map[string]any, error) {
+	tx, err := lab.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var orders, subtotal, shipping, total int
+	err = tx.QueryRow("SELECT count(*),COALESCE(sum(subtotal),0),COALESCE(sum(shipping_fee),0),COALESCE(sum(total_amount),0) FROM shop_orders WHERE organization_id=?", lab.organizationID).Scan(&orders, &subtotal, &shipping, &total)
+	if err != nil {
+		return nil, err
+	}
+	var items, units, lineTotal int
+	err = tx.QueryRow("SELECT count(*),COALESCE(sum(quantity),0),COALESCE(sum(line_total),0) FROM shop_order_items WHERE organization_id=?", lab.organizationID).Scan(&items, &units, &lineTotal)
+	if err != nil {
+		return nil, err
+	}
+	var stock, reserved int
+	err = tx.QueryRow("SELECT stock_quantity,reserved_quantity FROM shop_variants WHERE id=? AND organization_id=?", lab.variantID, lab.organizationID).Scan(&stock, &reserved)
+	if err != nil {
+		return nil, err
+	}
+	var activeReservations int
+	err = tx.QueryRow("SELECT count(*) FROM shop_inventory_reservations WHERE organization_id=? AND variant_id=? AND status='active'", lab.organizationID, lab.variantID).Scan(&activeReservations)
+	if err != nil {
+		return nil, err
+	}
+	consistent := orders == items && items == units && lineTotal == subtotal && total == subtotal+shipping && stock+units == lab.capacity && stock >= 0 && reserved >= 0
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"runId": lab.id, "capacity": lab.capacity, "orders": orders, "items": items, "units": units, "stock": stock, "reserved": reserved, "available": stock - reserved, "subtotal": subtotal, "shipping": shipping, "total": total, "activeReservations": activeReservations, "consistent": consistent}, nil
 }
