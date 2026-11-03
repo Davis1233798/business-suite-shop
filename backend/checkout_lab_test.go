@@ -10,7 +10,9 @@ import (
 
 func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	a := appForTest(t)
-	admin := login(t, a, "admin@suite.test", token())
+	space := token()
+	admin := login(t, a, "admin@suite.test", space)
+	var baselineOrders int
 	var me struct {
 		Data Identity `json:"data"`
 	}
@@ -18,6 +20,9 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 		t.Fatal(w.Body.String())
 	} else {
 		_ = json.Unmarshal(w.Body.Bytes(), &me)
+	}
+	if e := a.db.QueryRow("SELECT count(*) FROM shop_orders WHERE organization_id=?", me.Data.OrganizationID).Scan(&baselineOrders); e != nil {
+		t.Fatal(e)
 	}
 	product, variant := token(), token()
 	if _, e := a.db.Exec("INSERT INTO shop_categories(id,organization_id,name,slug) VALUES(?,?,?,?)", token(), me.Data.OrganizationID, "Checkout", "checkout-"+product); e != nil {
@@ -55,17 +60,32 @@ func TestShopCheckoutRouteUsesRealTenantScopedOrderTransaction(t *testing.T) {
 	if result.Data["orderId"] != first {
 		t.Fatalf("replay created a second order: %#v", result.Data)
 	}
+	changed := map[string]any{"variantId": variant, "quantity": 2, "idempotencyKey": "checkout-route-key", "customerEmail": "buyer@example.test", "shippingAddress": map[string]string{"name": "Buyer", "address": "Demo"}}
+	if w = request(a, "POST", "/api/stations/shop/checkout", changed, admin...); w.Code != 409 {
+		t.Fatalf("idempotency key with changed request: %d %s", w.Code, w.Body.String())
+	}
+	if w = request(a, "POST", "/api/stations/shop/checkout", payload, login(t, a, "admin@suite.test", token())...); w.Code != 404 {
+		t.Fatalf("cross-organization variant checkout: %d %s", w.Code, w.Body.String())
+	}
+	readonly := loginSite(t, a, "viewer@suite.test", space, "shop")
+	if w = request(a, "POST", "/api/stations/shop/checkout", payload, readonly...); w.Code != 403 {
+		t.Fatalf("readonly checkout: %d %s", w.Code, w.Body.String())
+	}
 	var count, stock int
 	_ = a.db.QueryRow("SELECT count(*) FROM shop_orders WHERE organization_id=?", me.Data.OrganizationID).Scan(&count)
 	_ = a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE id=?", variant).Scan(&stock)
-	if count != 1 || stock != 1 {
-		t.Fatalf("orders=%d stock=%d", count, stock)
+	if count != baselineOrders+1 || stock != 1 {
+		t.Fatalf("orders=%d baseline=%d stock=%d", count, baselineOrders, stock)
 	}
 }
 
 func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
 	a := appForTest(t)
 	admin := login(t, a, "admin@suite.test", token())
+	var baselineOrders int
+	if e := a.db.QueryRow("SELECT count(*) FROM shop_orders").Scan(&baselineOrders); e != nil {
+		t.Fatal(e)
+	}
 	w := request(a, http.MethodPost, "/api/stations/shop/checkout-lab", map[string]any{"action": "prepare", "capacity": 5}, admin...)
 	if w.Code != 200 {
 		t.Fatalf("prepare: %d %s", w.Code, w.Body.String())
@@ -123,8 +143,8 @@ func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
 		t.Fatalf("accepted=%d duplicate=%d soldout=%d", accepted, duplicates, soldOut)
 	}
 	var orders int
-	if e := a.db.QueryRow("SELECT count(*) FROM shop_orders").Scan(&orders); e != nil || orders != 0 {
-		t.Fatalf("lab contaminated workspace orders=%d err=%v", orders, e)
+	if e := a.db.QueryRow("SELECT count(*) FROM shop_orders").Scan(&orders); e != nil || orders != baselineOrders {
+		t.Fatalf("lab contaminated workspace orders=%d baseline=%d err=%v", orders, baselineOrders, e)
 	}
 	lab := a.checkoutLabForTest(prepared.Data.RunID)
 	if e := lab.db.QueryRow("SELECT count(*) FROM shop_orders").Scan(&orders); e != nil || orders != 5 {

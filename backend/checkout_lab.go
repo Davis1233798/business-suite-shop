@@ -20,7 +20,6 @@ type checkoutLab struct {
 	active                        int
 }
 
-// lookup's concrete database API is kept narrow for lab lifecycle management.
 func (a *App) cleanupCheckoutLabs(now time.Time) {
 	a.labMu.Lock()
 	defer a.labMu.Unlock()
@@ -92,6 +91,7 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
+	a.cleanupCheckoutLabs(time.Now())
 	var in struct {
 		Action   string `json:"action"`
 		RunID    string `json:"runId"`
@@ -142,6 +142,7 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		a.checkoutLabs[run] = lab
 		a.labMu.Unlock()
+		time.AfterFunc(checkoutLabTTL, func() { a.cleanupCheckoutLabs(time.Now()) })
 		ok(w, map[string]any{"runId": run, "capacity": in.Capacity, "unitPrice": 100})
 		return
 	}
@@ -159,7 +160,15 @@ func (a *App) checkoutLabAPI(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Checkout run not found in this workspace")
 		return
 	}
-	defer func() { a.labMu.Lock(); lab.active--; a.labMu.Unlock() }()
+	defer func() {
+		a.labMu.Lock()
+		lab.active--
+		if lab.active == 0 && time.Since(lab.createdAt) >= checkoutLabTTL {
+			_ = lab.db.Close()
+			delete(a.checkoutLabs, lab.id)
+		}
+		a.labMu.Unlock()
+	}()
 	result, e := checkoutOrder(r.Context(), lab.db, id.OrganizationID, id.UserID, checkoutInput{VariantID: lab.variantID, Quantity: 1, Key: strings.TrimSpace(in.Key), Email: "lab@example.invalid", Address: map[string]any{"name": "Checkout lab", "address": "Isolated fixture"}})
 	if e == errCheckoutSoldOut {
 		ok(w, map[string]any{"outcome": "sold_out", "remaining": 0, "capacity": lab.capacity})
