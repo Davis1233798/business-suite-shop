@@ -155,6 +155,43 @@ func shopCouponDiscount(tx *sql.Tx, organizationID, code string, subtotal int64,
 	return discount, nil
 }
 
+func allocateShopCouponDiscount(lines []checkoutResolvedLine, subtotal, discount int64) error {
+	if subtotal < 0 || discount < 0 || discount > subtotal {
+		return errCheckoutCoupon
+	}
+	if subtotal == 0 {
+		return nil
+	}
+	allocated := int64(0)
+	for i := range lines {
+		if lines[i].rawLineTotal < 0 {
+			return errCheckoutInvalid
+		}
+		var product big.Int
+		product.Mul(big.NewInt(lines[i].rawLineTotal), big.NewInt(discount))
+		product.Quo(&product, big.NewInt(subtotal))
+		share := product.Int64()
+		if share > lines[i].rawLineTotal || allocated > discount-share {
+			return errCheckoutInvalid
+		}
+		allocated += share
+		lines[i].lineTotal = lines[i].rawLineTotal - share
+	}
+	remaining := discount - allocated
+	for i := len(lines) - 1; i >= 0 && remaining > 0; i-- {
+		extra := lines[i].lineTotal
+		if extra > remaining {
+			extra = remaining
+		}
+		lines[i].lineTotal -= extra
+		remaining -= extra
+	}
+	if remaining != 0 {
+		return errCheckoutInvalid
+	}
+	return nil
+}
+
 func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID string, in checkoutInput) (map[string]any, error) {
 	if err := releaseExpiredShopReservations(db, organizationID, time.Now()); err != nil {
 		return nil, err
@@ -277,19 +314,8 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 		return nil, errCheckoutInvalid
 	}
 	total := netSubtotal + shippingFee
-	allocated := int64(0)
-	for i := range lines {
-		share := int64(0)
-		if i == len(lines)-1 {
-			share = couponDiscount - allocated
-		} else if subtotal > 0 {
-			var product big.Int
-			product.Mul(big.NewInt(lines[i].rawLineTotal), big.NewInt(couponDiscount))
-			product.Quo(&product, big.NewInt(subtotal))
-			share = product.Int64()
-			allocated += share
-		}
-		lines[i].lineTotal = lines[i].rawLineTotal - share
+	if err = allocateShopCouponDiscount(lines, subtotal, couponDiscount); err != nil {
+		return nil, err
 	}
 	for _, line := range lines {
 		res, updateErr := tx.Exec("UPDATE shop_variants SET stock_quantity=stock_quantity-? WHERE id=? AND organization_id=? AND is_active=1 AND stock_quantity-reserved_quantity>=?", line.quantity, line.variantID, organizationID, line.quantity)

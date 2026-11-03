@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -287,6 +289,161 @@ func TestShopCouponRemainderRefundsSumToDiscountedLineAmount(t *testing.T) {
 	}
 	if amounts[0] != 99 || amounts[1] != 100 || amounts[0]+amounts[1] != int64(discountedLine) {
 		t.Fatalf("discounted refund split=%v, line total=%d", amounts, discountedLine)
+	}
+}
+
+func TestShopCouponDiscountRemainderNeverMakesZeroPriceTailNegative(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+	if _, err := a.db.Exec("UPDATE shop_variants SET price=1 WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec("UPDATE shop_variants SET price=2 WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantB); err != nil {
+		t.Fatal(err)
+	}
+	var productID string
+	if err := a.db.QueryRow("SELECT product_id FROM shop_variants WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantA).Scan(&productID); err != nil {
+		t.Fatal(err)
+	}
+	zeroVariant := "zz-zero-price-" + token()
+	if _, err := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,reserved_quantity,is_active) VALUES(?,?,?,?,?,0,5,0,1)", zeroVariant, catalog.orgID, productID, "SKU-ZERO-"+token(), "Free line"); err != nil {
+		t.Fatal(err)
+	}
+	addCouponTestPromotion(t, a, catalog.orgID, "TWO-OFF-3", "fixed", 2, 0, nil, 1)
+	addCouponTestPromotion(t, a, catalog.orgID, "FULL-OFF-3", "percentage", 100, 0, nil, 1)
+	items := []map[string]any{{"variantId": catalog.variantA, "quantity": 1}, {"variantId": catalog.variantB, "quantity": 1}, {"variantId": zeroVariant, "quantity": 1}}
+	for _, tc := range []struct {
+		key, code string
+		wantNet   int
+	}{{"coupon-zero-tail-partial", "TWO-OFF-3", 1}, {"coupon-zero-tail-full", "FULL-OFF-3", 0}} {
+		w := couponCheckout(a, catalog.admin, tc.key, tc.code, items...)
+		if w.Code != http.StatusOK {
+			t.Fatalf("zero-price tail %s checkout: %d %s", tc.code, w.Code, w.Body.String())
+		}
+		var result struct {
+			Data struct {
+				OrderID string `json:"orderId"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := a.db.Query("SELECT line_total FROM shop_order_items WHERE organization_id=? AND order_id=?", catalog.orgID, result.Data.OrderID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sum int
+		for rows.Next() {
+			var lineTotal int
+			if err = rows.Scan(&lineTotal); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			if lineTotal < 0 {
+				rows.Close()
+				t.Fatalf("coupon %s produced negative discounted line total %d", tc.code, lineTotal)
+			}
+			sum += lineTotal
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		rows.Close()
+		if sum != tc.wantNet {
+			t.Fatalf("coupon %s line total sum=%d want=%d", tc.code, sum, tc.wantNet)
+		}
+	}
+}
+
+func TestShopMultiItemPaymentConsumesAndExpiresAllReservationsAtomically(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+	makeOrder := func(key string) (string, int) {
+		t.Helper()
+		w := couponCheckout(a, catalog.admin, key, "", map[string]any{"variantId": catalog.variantA, "quantity": 2}, map[string]any{"variantId": catalog.variantB, "quantity": 1})
+		if w.Code != http.StatusOK {
+			t.Fatalf("multi-item checkout: %d %s", w.Code, w.Body.String())
+		}
+		var result struct {
+			Data struct {
+				OrderID string `json:"orderId"`
+				Total   int    `json:"totalAmount"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Data.Total != 360 {
+			t.Fatalf("multi-item total=%d, want 360", result.Data.Total)
+		}
+		return result.Data.OrderID, result.Data.Total
+	}
+	setExpired := func(orderID string) {
+		t.Helper()
+		if _, err := a.db.Exec("UPDATE shop_inventory_reservations SET expires_at='2000-01-01T00:00:00Z' WHERE organization_id=? AND cart_id=?", catalog.orgID, orderID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkReservations := func(orderID, expected string) {
+		t.Helper()
+		var total, matching int
+		if err := a.db.QueryRow("SELECT count(*),COALESCE(sum(CASE WHEN status=? THEN 1 ELSE 0 END),0) FROM shop_inventory_reservations WHERE organization_id=? AND cart_id=? AND session_id LIKE 'shop-go-checkout:%'", expected, catalog.orgID, orderID).Scan(&total, &matching); err != nil || total != 2 || matching != 2 {
+			t.Fatalf("reservation states order=%s total=%d %s=%d err=%v", orderID, total, expected, matching, err)
+		}
+	}
+	callback := func(orderID, reference string, amount int) *httptest.ResponseRecorder {
+		return request(a, http.MethodPost, "/api/stations/shop/payment/callback", map[string]any{"orderId": orderID, "attemptReference": reference, "amount": amount, "status": "success"}, catalog.admin...)
+	}
+	paidOrder, paidAmount := makeOrder("multi-paid-checkout-01")
+	if w := callback(paidOrder, "multi-paid-attempt-01", paidAmount); w.Code != http.StatusOK {
+		t.Fatalf("multi-item payment: %d %s", w.Code, w.Body.String())
+	}
+	checkReservations(paidOrder, "consumed")
+	var paidState string
+	if err := a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE organization_id=? AND id=?", catalog.orgID, paidOrder).Scan(&paidState); err != nil || paidState != "paid" {
+		t.Fatalf("multi-item paid state=%s err=%v", paidState, err)
+	}
+	expiredOrder, expiredAmount := makeOrder("multi-expired-checkout-01")
+	setExpired(expiredOrder)
+	if w := callback(expiredOrder, "multi-expired-attempt-01", expiredAmount); w.Code != http.StatusConflict {
+		t.Fatalf("multi-item expired payment: %d %s", w.Code, w.Body.String())
+	}
+	checkReservations(expiredOrder, "expired")
+	var expiredState string
+	if err := a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE organization_id=? AND id=?", catalog.orgID, expiredOrder).Scan(&expiredState); err != nil || expiredState != "expired" {
+		t.Fatalf("multi-item expired state=%s err=%v", expiredState, err)
+	}
+	var stockA, stockB int
+	if err := a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantA).Scan(&stockA); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantB).Scan(&stockB); err != nil || stockA != 18 || stockB != 19 {
+		t.Fatalf("multi-item expiry did not restore all stock: A=%d B=%d err=%v", stockA, stockB, err)
+	}
+	raceOrder, raceAmount := makeOrder("multi-race-checkout-01")
+	setExpired(raceOrder)
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			w := callback(raceOrder, fmt.Sprintf("multi-race-attempt-%02d", i), raceAmount)
+			if w.Code != http.StatusConflict {
+				t.Errorf("expired multi-item race callback status=%d body=%s", w.Code, w.Body.String())
+			}
+		}(i)
+	}
+	wg.Wait()
+	checkReservations(raceOrder, "expired")
+	if err := a.db.QueryRow("SELECT payment_status FROM shop_orders WHERE organization_id=? AND id=?", catalog.orgID, raceOrder).Scan(&expiredState); err != nil || expiredState != "expired" {
+		t.Fatalf("multi-item race state=%s err=%v", expiredState, err)
+	}
+	if err := a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantA).Scan(&stockA); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantB).Scan(&stockB); err != nil || stockA != 18 || stockB != 19 {
+		t.Fatalf("multi-item expiration race restored stock incorrectly: A=%d B=%d err=%v", stockA, stockB, err)
 	}
 }
 

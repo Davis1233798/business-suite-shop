@@ -29,6 +29,31 @@ type paymentCallbackResult struct {
 	Duplicate     bool   `json:"duplicate"`
 }
 
+type shopPaymentReservation struct {
+	id, variantID, expiresAt, status string
+	quantity                         int
+}
+
+func loadShopPaymentReservations(tx *sql.Tx, organizationID, orderID string) ([]shopPaymentReservation, error) {
+	rows, err := tx.Query(`SELECT id,variant_id,quantity,expires_at,status FROM shop_inventory_reservations WHERE organization_id=? AND cart_id=? AND session_id LIKE 'shop-go-checkout:%' ORDER BY created_at,id`, organizationID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	reservations := []shopPaymentReservation{}
+	for rows.Next() {
+		var reservation shopPaymentReservation
+		if err = rows.Scan(&reservation.id, &reservation.variantID, &reservation.quantity, &reservation.expiresAt, &reservation.status); err != nil {
+			return nil, err
+		}
+		reservations = append(reservations, reservation)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return reservations, nil
+}
+
 func simulateShopPayment(db *sql.DB, organizationID, actorID, actorRole string, in paymentCallbackInput, now time.Time) (paymentCallbackResult, error) {
 	in.OrderID = strings.TrimSpace(in.OrderID)
 	in.AttemptReference = strings.TrimSpace(in.AttemptReference)
@@ -71,30 +96,31 @@ func simulateShopPayment(db *sql.DB, organizationID, actorID, actorRole string, 
 	if err != sql.ErrNoRows {
 		return paymentCallbackResult{}, err
 	}
-	var reservationID, expiresAt, reservationStatus string
-	err = tx.QueryRow(`SELECT id,expires_at,status FROM shop_inventory_reservations WHERE organization_id=? AND cart_id=? AND session_id LIKE 'shop-go-checkout:%' ORDER BY created_at DESC,id DESC LIMIT 1`, organizationID, in.OrderID).Scan(&reservationID, &expiresAt, &reservationStatus)
-	if err == sql.ErrNoRows {
-		return paymentCallbackResult{}, errPaymentConflict
-	}
+	reservations, err := loadShopPaymentReservations(tx, organizationID, in.OrderID)
 	if err != nil {
 		return paymentCallbackResult{}, err
 	}
+	if len(reservations) == 0 {
+		return paymentCallbackResult{}, errPaymentConflict
+	}
 	if paymentStatus == "pending" || paymentStatus == "failed" {
-		if reservationStatus != "active" {
-			return paymentCallbackResult{}, errPaymentConflict
-		}
-		parsedExpiry, parseErr := time.Parse(time.RFC3339Nano, expiresAt)
-		if parseErr != nil {
-			return paymentCallbackResult{}, errPaymentConflict
-		}
-		if !parsedExpiry.After(now) {
-			if err = expireShopOrderTx(tx, organizationID, in.OrderID, reservationID); err != nil {
-				return paymentCallbackResult{}, err
+		for _, reservation := range reservations {
+			if reservation.status != "active" || reservation.quantity < 1 {
+				return paymentCallbackResult{}, errPaymentConflict
 			}
-			if err = tx.Commit(); err != nil {
-				return paymentCallbackResult{}, err
+			parsedExpiry, parseErr := time.Parse(time.RFC3339Nano, reservation.expiresAt)
+			if parseErr != nil {
+				return paymentCallbackResult{}, errPaymentConflict
 			}
-			return paymentCallbackResult{}, errPaymentConflict
+			if !parsedExpiry.After(now) {
+				if err = expireShopOrderTx(tx, organizationID, in.OrderID); err != nil {
+					return paymentCallbackResult{}, err
+				}
+				if err = tx.Commit(); err != nil {
+					return paymentCallbackResult{}, err
+				}
+				return paymentCallbackResult{}, errPaymentConflict
+			}
 		}
 	} else if paymentStatus != "paid" {
 		return paymentCallbackResult{}, errPaymentConflict
@@ -113,12 +139,12 @@ func simulateShopPayment(db *sql.DB, organizationID, actorID, actorRole string, 
 			return paymentCallbackResult{}, e
 		}
 		if changed == 1 {
-			res, e = tx.Exec(`UPDATE shop_inventory_reservations SET status='consumed' WHERE id=? AND organization_id=? AND status='active'`, reservationID, organizationID)
+			res, e = tx.Exec(`UPDATE shop_inventory_reservations SET status='consumed' WHERE organization_id=? AND cart_id=? AND session_id LIKE 'shop-go-checkout:%' AND status='active'`, organizationID, in.OrderID)
 			if e != nil {
 				return paymentCallbackResult{}, e
 			}
 			changed, e = res.RowsAffected()
-			if e != nil || changed != 1 {
+			if e != nil || changed != int64(len(reservations)) {
 				if e != nil {
 					return paymentCallbackResult{}, e
 				}
@@ -149,31 +175,48 @@ func simulateShopPayment(db *sql.DB, organizationID, actorID, actorRole string, 
 	return paymentCallbackResult{OrderID: in.OrderID, PaymentStatus: paymentStatus, AttemptStatus: in.Status}, nil
 }
 
-func expireShopOrderTx(tx *sql.Tx, organizationID, orderID, reservationID string) error {
-	var variant string
-	var quantity int
-	if err := tx.QueryRow(`SELECT variant_id,quantity FROM shop_inventory_reservations WHERE id=? AND organization_id=? AND status='active'`, reservationID, organizationID).Scan(&variant, &quantity); err != nil {
+func expireShopOrderTx(tx *sql.Tx, organizationID, orderID string) error {
+	reservations, err := loadShopPaymentReservations(tx, organizationID, orderID)
+	if err != nil {
 		return err
 	}
-	res, err := tx.Exec(`UPDATE shop_inventory_reservations SET status='expired' WHERE id=? AND organization_id=? AND status='active'`, reservationID, organizationID)
+	activeCount := 0
+	for _, reservation := range reservations {
+		if reservation.status != "active" {
+			continue
+		}
+		activeCount++
+		res, updateErr := tx.Exec(`UPDATE shop_inventory_reservations SET status='expired' WHERE id=? AND organization_id=? AND status='active'`, reservation.id, organizationID)
+		if updateErr != nil {
+			return updateErr
+		}
+		changed, updateErr := res.RowsAffected()
+		if updateErr != nil {
+			return updateErr
+		}
+		if changed != 1 {
+			return errPaymentConflict
+		}
+		stockUpdate, updateErr := tx.Exec(`UPDATE shop_variants SET stock_quantity=stock_quantity+? WHERE id=? AND organization_id=?`, reservation.quantity, reservation.variantID, organizationID)
+		if updateErr != nil {
+			return updateErr
+		}
+		stockChanged, updateErr := stockUpdate.RowsAffected()
+		if updateErr != nil {
+			return updateErr
+		}
+		if stockChanged != 1 {
+			return errPaymentConflict
+		}
+	}
+	if activeCount == 0 {
+		return errPaymentConflict
+	}
+	res, err := tx.Exec(`UPDATE shop_orders SET payment_status='expired' WHERE id=? AND organization_id=? AND payment_status IN ('pending','failed')`, orderID, organizationID)
 	if err != nil {
 		return err
 	}
 	changed, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if changed != 1 {
-		return errPaymentConflict
-	}
-	if _, err = tx.Exec(`UPDATE shop_variants SET stock_quantity=stock_quantity+? WHERE id=? AND organization_id=?`, quantity, variant, organizationID); err != nil {
-		return err
-	}
-	res, err = tx.Exec(`UPDATE shop_orders SET payment_status='expired' WHERE id=? AND organization_id=? AND payment_status IN ('pending','failed')`, orderID, organizationID)
-	if err != nil {
-		return err
-	}
-	changed, err = res.RowsAffected()
 	if err != nil {
 		return err
 	}
