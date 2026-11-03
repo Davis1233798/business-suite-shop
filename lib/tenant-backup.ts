@@ -7,7 +7,7 @@ import { generateCsv } from "./export-csv";
 // Identity, authorization, audit history and replay caches are intentionally not
 // restorable business data. Audit history survives restoring a snapshot.
 const excluded = new Set(["organizations", "users", "memberships", "audit_events", "idempotency_keys", "outbox_events", "demo_seed_states"]);
-const tables = Object.values(schema).filter(table => "organizationId" in getTableColumns(table) && !excluded.has(getTableName(table)));
+const tables = Object.values(schema).filter(table => "organizationId" in getTableColumns(table) && getTableName(table).startsWith("shop_") && !excluded.has(getTableName(table)));
 const byName = new Map<string, (typeof tables)[number]>(tables.map(table => [getTableName(table), table]));
 export interface TenantBackup { format: "business-suite/v1"; organizationId: string; exportedAt: string; tables: Record<string, Record<string, any>[]>; }
 
