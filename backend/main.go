@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,8 +28,10 @@ var migrations embed.FS
 var sites = []string{"mes", "erp", "pos", "crm", "dining", "shop"}
 
 type App struct {
-	db     *sql.DB
-	assets string
+	db           *sql.DB
+	assets       string
+	labMu        sync.Mutex
+	checkoutLabs map[string]*checkoutLab
 }
 type Grant struct {
 	Site    string `json:"site"`
@@ -128,7 +131,7 @@ func openDB(file string) (*sql.DB, error) {
 		}
 	}
 	files = append(files, "shop_guards.sql")
-	files = append(files, "0004_station_identity.sql", "0005_traffic_lab.sql", "0006_shop_checkout_lab.sql")
+	files = append(files, "0004_station_identity.sql", "0005_traffic_lab.sql")
 	for _, f := range files {
 		b, err := migrations.ReadFile("migrations/" + f)
 		if err != nil {
@@ -401,6 +404,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	mux.HandleFunc("/api/auth/{action}", a.auth)
 	mux.HandleFunc("/api/stations/{site}/traffic", a.trafficAPI)
+	mux.HandleFunc("/api/stations/{site}/checkout", a.shopCheckoutAPI)
 	mux.HandleFunc("/api/stations/{site}/checkout-lab", a.checkoutLabAPI)
 	mux.HandleFunc("/api/stations/{site}/{action}", a.stationAPI)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
