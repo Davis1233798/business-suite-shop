@@ -134,7 +134,7 @@
 
 服務端固定運費 60，忽略客戶端運費／商品售價。待付庫存於建單時扣減並建立 15 分鐘 reservation；商品查詢／結帳／付款請求觸發逾時回庫；成功付款後 reservation 為 consumed。退款商品額不自動退運費。
 
-舊端點仍保留：`/api/shop/checkout`、`/api/shop/payment/callback`、`/api/shop/ship`、`/api/shop/refund`。它們使用同一服務，`payment/callback` 名稱不表示已串接真實或簽章驗證的金流。新客戶端宜集中使用 `/action`。
+舊 TypeScript 端點仍保留於原 runtime。Go Shop 新付款端點為 `/api/stations/shop/payment/callback`，僅供已登入且具 Shop back-office 寫入權限的使用者操作；它模擬付款結果，不驗證外部 provider 簽章、不實際扣款。成功會原子提交付款嘗試、訂單狀態、Go 結帳預留消耗與 `shop.paid` outbox 事件。
 
 ## 尚未公開的能力
 

@@ -130,6 +130,8 @@ CREATE TABLE `shop_payment_attempts` (
 	`provider` text DEFAULT 'mock_gateway' NOT NULL,
 	`status` text DEFAULT 'pending' NOT NULL,
 	`callback_payload` text,
+	`actor_id` text NOT NULL DEFAULT '',
+	`actor_role` text NOT NULL DEFAULT '',
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 --> statement-breakpoint
