@@ -15,7 +15,7 @@ type Dataset struct {
 }
 
 var datasets = map[string][]Dataset{
-	"shop": {{"products", "shop_products", "Products", []string{"id", "name", "slug", "description", "is_active"}}, {"variants", "shop_variants", "Product variants", []string{"id", "product_id", "sku", "title", "price", "stock_quantity"}}, {"orders", "shop_orders", "Orders", []string{"id", "order_number", "fulfillment_status", "payment_status", "total_amount", "created_at"}}, {"items", "shop_order_items", "Order items", nil}, {"returns", "shop_returns", "Returns", nil}, {"reviews", "shop_reviews", "Reviews", nil}},
+	"shop": {{"products", "shop_products", "Products", []string{"id", "name", "slug", "description", "category_id", "is_active"}}, {"categories", "shop_categories", "Categories", []string{"id", "name", "slug"}}, {"variants", "shop_variants", "Product variants", []string{"id", "product_id", "sku", "title", "price", "stock_quantity", "is_active"}}, {"orders", "shop_orders", "Orders", []string{"id", "order_number", "fulfillment_status", "payment_status", "tracking_number", "total_amount", "created_at"}}, {"items", "shop_order_items", "Order items", []string{"id", "order_id", "product_name", "variant_title", "quantity", "line_total", "created_at"}}, {"returns", "shop_returns", "Returns", nil}, {"reviews", "shop_reviews", "Reviews", nil}},
 }
 
 func camel(s string) string {
@@ -91,9 +91,16 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			query := "SELECT " + columns + " FROM " + d.Table + " WHERE organization_id=?"
 			args := []any{id.OrganizationID}
+			if front && site == "shop" && (d.Key == "products" || d.Key == "variants") {
+				query += " AND is_active=1"
+			}
 			if front && site == "shop" && d.Key == "orders" {
 				query += " AND user_id=?"
 				args = append(args, id.UserID)
+			}
+			if front && site == "shop" && d.Key == "items" {
+				query += " AND order_id IN (SELECT id FROM shop_orders WHERE organization_id=? AND user_id=?)"
+				args = append(args, id.OrganizationID, id.UserID)
 			}
 			rows, err := queryMaps(a.db, query+" ORDER BY rowid DESC LIMIT 500", args...)
 			if err != nil {
@@ -101,6 +108,9 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			out[d.Key] = rows
+		}
+		if front && site == "shop" {
+			w.Header().Set("Cache-Control", "private, no-store")
 		}
 		ok(w, out)
 		return

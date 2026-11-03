@@ -12,8 +12,15 @@ func TestShopStorefrontFrontProjectionAndCheckoutOwnership(t *testing.T) {
 	front := loginSite(t, a, "front@suite.test", space, "shop")
 	admin := loginSite(t, a, "admin@suite.test", space, "shop")
 	readonly := loginSite(t, a, "viewer@suite.test", space, "shop")
+	identityResponse := request(a, http.MethodGet, "/api/auth/me?site=shop", nil, front...)
+	var identityEnvelope struct {
+		Data Identity `json:"data"`
+	}
+	if identityResponse.Code != http.StatusOK || json.Unmarshal(identityResponse.Body.Bytes(), &identityEnvelope) != nil {
+		t.Fatalf("read storefront identity: %d %s", identityResponse.Code, identityResponse.Body.String())
+	}
 	var variantIDs []string
-	rows, err := a.db.Query("SELECT id FROM shop_variants WHERE organization_id=(SELECT organization_id FROM station_accounts WHERE email='front@suite.test' ORDER BY rowid DESC LIMIT 1) AND is_active=1 ORDER BY id LIMIT 2")
+	rows, err := a.db.Query("SELECT id FROM shop_variants WHERE organization_id=? AND is_active=1 ORDER BY id LIMIT 2", identityEnvelope.Data.OrganizationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +40,7 @@ func TestShopStorefrontFrontProjectionAndCheckoutOwnership(t *testing.T) {
 	}
 	address := map[string]string{"name": "Buyer", "city": "Taipei", "address": "Demo Road 1", "phone": "0900000000"}
 	input := map[string]any{
-		"items": []map[string]any{{"variantId": variantIDs[0], "quantity": 1}, {"variantId": variantIDs[1], "quantity": 1}},
+		"items":         []map[string]any{{"variantId": variantIDs[0], "quantity": 1}, {"variantId": variantIDs[1], "quantity": 1}},
 		"customerEmail": "front@example.test", "shippingAddress": address, "couponCode": "SAVE10", "idempotencyKey": "storefront-multi-item-001",
 	}
 	checkout := func(cookies []*http.Cookie, payload map[string]any) map[string]any {
@@ -59,7 +66,7 @@ func TestShopStorefrontFrontProjectionAndCheckoutOwnership(t *testing.T) {
 		t.Fatalf("idempotent replay did not return the original order: %#v", frontReplay)
 	}
 	adminInput := map[string]any{
-		"items": []map[string]any{{"variantId": variantIDs[0], "quantity": 1}},
+		"items":         []map[string]any{{"variantId": variantIDs[0], "quantity": 1}},
 		"customerEmail": "admin@example.test", "shippingAddress": address, "idempotencyKey": "storefront-other-buyer-001",
 	}
 	adminOrder := checkout(admin, adminInput)

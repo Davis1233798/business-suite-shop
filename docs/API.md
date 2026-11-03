@@ -32,7 +32,9 @@
 
 ## Go/React Shop checkout migration slice
 
-以下路徑屬於 Go/React station runtime，使用 `suite_session` 登入工作區；需要啟用的 Shop grant 和可寫角色。售價、組織、身份、庫存與訂單金額都由伺服器決定。
+以下路徑屬於 Go/React station runtime，使用 `suite_session_shop` 登入工作區；需要啟用的 Shop grant 和可寫角色。售價、組織、身份、庫存與訂單金額都由伺服器決定。`/shop/front` 現在使用這組 Go 身分與資料，不會讀取 legacy Next `demo_session_id` 或角色 cookie。
+
+`GET /api/stations/shop/data?view=front` 提供商店商品、分類、規格及登入者本人訂單／明細的最小欄位投影；訂單和明細都由伺服器依目前登入者過濾，不回傳地址快照、電子郵件、付款嘗試或其他買家的資料。店面支援搜尋、分類、購物袋、多規格結帳、單一優惠碼及本人訂單狀態查詢。唯讀角色可以瀏覽，但無法建立訂單。下單後初始狀態為待付款；付款仍由後台模擬操作，沒有實際金流。
 
 `POST /api/stations/shop/checkout`：`items:[{variantId,quantity}]`（1–50 種規格，各 1–999 件），或為舊用戶保留的 `variantId` + `quantity`（1–100），另含 `idempotencyKey`, `customerEmail`, `shippingAddress:{name,city,address,phone}` 及可選 `couponCode`。售價、租戶、折扣和應付金額均由伺服器計算；優惠券按該租戶的啟用狀態、到期時間和商品小計最低門檻驗證。百分比沿用 legacy 四捨五入，固定/百分比折扣都不會超過商品小計；一張券只適用一次且不與其他券併用。運費沿用 legacy 固定 TWD 60，沒有免運門檻。商品折扣依行小計比例分配，整數餘額只分配到尚有未折扣金額的明細，不會讓零元明細變負數；訂單明細持久化折後金額，退款依明細折後金額與退貨數量比例計算。優惠券不設核銷次數上限（既有 promotion schema 無此欄位）。以可用量 `stock_quantity - reserved_quantity` 扣庫，建立 Shop 訂單／明細及 15 分鐘預留；相同租戶、帳號、購物車、地址和券碼的 key 重送回原訂單；部署前建立的單商品無券訂單重送沿用舊 fingerprint，只有 actor 與完整舊 payload 完全相符才回原訂單；不同 payload、券碼或帳號重用 key 回 409。過期訂單的舊 key 回 409，需重新結帳並使用新 key。預留到期目前由後續 checkout 請求釋放。
 
