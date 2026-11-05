@@ -36,6 +36,29 @@ jobs:
           done
           curl --fail --silent http://127.0.0.1:18095/api/health > /dev/null
           test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:18095/mes/login)" = 404
+      - name: Install Chromium for print preview lifecycle acceptance
+        run: npx playwright install --with-deps chromium
+      - name: Verify print preview request cancellation in the SHOP image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name shop-browser -p 127.0.0.1:18095:8095 shop-ci:${GITHUB_SHA}
+          trap 'docker logs shop-browser; docker rm -f shop-browser' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18095/api/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl --fail --silent http://127.0.0.1:18095/api/health > /dev/null
+          npx playwright test --config playwright.lifecycle.config.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shop-print-preview-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Publish SHOP image on main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
