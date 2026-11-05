@@ -9,7 +9,6 @@ const traditionalChinese:Record<string,string> = {
   "Last page": "最後一頁",
   "Page": "頁",
   "of": "／",
-  "Orders": "訂單",
   "Shop storefront": "MarketLane 商店前台",
   "Shop commerce operations are served by Go station APIs.": "商店交易作業由 Go 分站 API 提供。",
   "Migration preview: Go supports sign-in, authorization, printing and Shop checkout; other transactional writes are still being migrated.": "移植預覽：Go 支援登入、授權、列印及商店結帳；其他交易寫入仍在移植中。",
