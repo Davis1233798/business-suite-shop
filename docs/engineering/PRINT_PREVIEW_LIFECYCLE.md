@@ -4,4 +4,4 @@ The workspace print preview temporarily loads the back-office dataset into the p
 
 This boundary applies only to the print-preview dataset. It does not clear the active workspace dataset, user-entered form drafts, or authentication state. The iframe previews are separately mounted only while selected and are mutually exclusive.
 
-The lifecycle contract is covered by `tests/unit/print-preview-lifecycle.test.ts` in the existing CI unit-test command.
+The Playwright lifecycle regression opens print preview while its dataset request is held, closes the preview, checks that the browser reports the request as aborted, then reopens and verifies that a fresh dataset request succeeds. CI runs it against the isolated SHOP station image.
