@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -15,7 +16,15 @@ type Dataset struct {
 }
 
 var datasets = map[string][]Dataset{
-	"shop": {{"products", "shop_products", "Products", []string{"id", "name", "description", "category_id"}}, {"categories", "shop_categories", "Categories", []string{"id", "name"}}, {"variants", "shop_variants", "Product variants", []string{"id", "product_id", "title", "price"}}, {"orders", "shop_orders", "Orders", []string{"id", "order_number", "fulfillment_status", "payment_status", "tracking_number", "total_amount", "created_at"}}, {"items", "shop_order_items", "Order items", []string{"id", "order_id", "product_name", "variant_title", "quantity", "line_total", "created_at"}}, {"returns", "shop_returns", "Returns", nil}, {"reviews", "shop_reviews", "Reviews", nil}},
+	"shop": {
+		{"products", "shop_products", "Products", []string{"id", "name", "description", "category_id"}},
+		{"categories", "shop_categories", "Categories", []string{"id", "name"}},
+		{"variants", "shop_variants", "Product variants", []string{"id", "product_id", "title", "price"}},
+		{"orders", "shop_orders", "Orders", []string{"id", "order_number", "fulfillment_status", "payment_status", "tracking_number", "total_amount", "created_at"}},
+		{"items", "shop_order_items", "Order items", []string{"id", "order_id", "product_name", "variant_title", "quantity", "line_total", "created_at"}},
+		{"returns", "shop_returns", "Returns", nil},
+		{"reviews", "shop_reviews", "Reviews", []string{"id", "product_id", "rating", "comment", "created_at"}},
+	},
 }
 
 func camel(s string) string {
@@ -27,6 +36,7 @@ func camel(s string) string {
 	}
 	return strings.Join(parts, "")
 }
+
 func queryMaps(db *sql.DB, query string, args ...any) ([]map[string]any, error) {
 	rows, e := db.Query(query, args...)
 	if e != nil {
@@ -58,6 +68,7 @@ func queryMaps(db *sql.DB, query string, args ...any) ([]map[string]any, error) 
 	}
 	return out, rows.Err()
 }
+
 func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 	site, action := r.PathValue("site"), r.PathValue("action")
 	if !knownSite(site) {
@@ -74,14 +85,48 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "No access to this workspace")
 		return
 	}
+	if action == "operations-snapshot" && site == "shop" {
+		a.operationsSnapshot(w, r, id, g, site)
+		return
+	}
+	if action == "cart-checkout" && site == "shop" {
+		a.shopCartCheckout(w, r, id, g)
+		return
+	}
+	if action == "after-sales" && site == "shop" {
+		a.shopAfterSales(w, r, id, g)
+		return
+	}
+	if action == "business" && site == "shop" {
+		a.shopBusiness(w, r, id, g)
+		return
+	}
 	if action == "data" && r.Method == "GET" {
 		front := r.URL.Query().Get("view") == "front"
 		if !front && g.Scope != "back" {
 			fail(w, 403, "Front-office accounts cannot read back-office data")
 			return
 		}
+		requestedDataset := r.URL.Query().Get("dataset")
+		search := strings.TrimSpace(r.URL.Query().Get("search"))
+		if len(search) > 200 || (search != "" && requestedDataset == "") {
+			fail(w, 400, "Invalid dataset search")
+			return
+		}
+		offset := 0
+		if raw := r.URL.Query().Get("offset"); raw != "" {
+			var err error
+			offset, err = strconv.Atoi(raw)
+			if err != nil || offset < 0 || offset > 1000000 || requestedDataset == "" {
+				fail(w, 400, "Invalid dataset offset")
+				return
+			}
+		}
 		out := map[string]any{}
 		for _, d := range datasets[site] {
+			if requestedDataset != "" && d.Key != requestedDataset {
+				continue
+			}
 			if front && len(d.Front) == 0 {
 				continue
 			}
@@ -109,12 +154,72 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 				query += " AND order_id IN (SELECT id FROM shop_orders WHERE organization_id=? AND user_id=?)"
 				args = append(args, id.OrganizationID, id.UserID)
 			}
-			rows, err := queryMaps(a.db, query+" ORDER BY rowid DESC LIMIT 500", args...)
+			if front && site == "shop" && d.Key == "reviews" {
+				query += " AND is_visible=1"
+			}
+			if search != "" {
+				searchColumns := d.Front
+				if !front {
+					searchColumns = nil
+					info, err := a.db.Query("PRAGMA table_info(" + d.Table + ")")
+					if err != nil {
+						fail(w, 500, "Unable to search workspace data")
+						return
+					}
+					for info.Next() {
+						var cid, notnull, pk int
+						var name, typ string
+						var defaultValue any
+						if err = info.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+							break
+						}
+						if name != "organization_id" {
+							searchColumns = append(searchColumns, name)
+						}
+					}
+					if err == nil {
+						err = info.Err()
+					}
+					info.Close()
+					if err != nil {
+						fail(w, 500, "Unable to search workspace data")
+						return
+					}
+				}
+				terms := make([]string, 0, len(searchColumns))
+				for _, column := range searchColumns {
+					terms = append(terms, "instr(lower(CAST(\""+strings.ReplaceAll(column, "\"", "\"\"")+"\" AS TEXT)), lower(?)) > 0")
+					args = append(args, search)
+				}
+				if len(terms) == 0 {
+					fail(w, 400, "Dataset cannot be searched")
+					return
+				}
+				query += " AND (" + strings.Join(terms, " OR ") + ")"
+			}
+			args = append(args, offset)
+			rows, err := queryMaps(a.db, query+" ORDER BY rowid DESC LIMIT 500 OFFSET ?", args...)
 			if err != nil {
 				fail(w, 500, "Unable to read workspace data: "+d.Key)
 				return
 			}
 			out[d.Key] = rows
+		}
+		if requestedDataset != "" {
+			if _, exists := out[requestedDataset]; !exists {
+				fail(w, 404, "Dataset unavailable")
+				return
+			}
+			ok(w, out)
+			return
+		}
+		if site == "shop" && !front {
+			events, err := queryMaps(a.db, "SELECT id,status,retry_count,created_at FROM outbox_events WHERE organization_id=? AND event_type='shop.paid' ORDER BY rowid DESC LIMIT 100", id.OrganizationID)
+			if err != nil {
+				fail(w, 500, "Unable to read commerce events")
+				return
+			}
+			out["fulfillmentEvents"] = events
 		}
 		if front && site == "shop" {
 			w.Header().Set("Cache-Control", "private, no-store")
@@ -151,6 +256,7 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	fail(w, 501, "This operation has not been migrated to Go. No changes were made")
 }
+
 func (a *App) manageUser(w http.ResponseWriter, r *http.Request, id *Identity, site string) {
 	var input struct {
 		UserID   string `json:"userId"`
@@ -222,7 +328,8 @@ func (a *App) manageUser(w http.ResponseWriter, r *http.Request, id *Identity, s
 type PrintKind struct{ Site, Dataset, Title, Lines, ForeignKey string }
 
 var printKinds = map[string]PrintKind{
-	"shop-product-label": {"shop", "variants", "Product variant label", "", ""}, "shop-order": {"shop", "orders", "Commerce order", "shop_order_items", "order_id"},
+	"shop-product-label": {"shop", "variants", "Product variant label", "", ""},
+	"shop-order":         {"shop", "orders", "Commerce order", "shop_order_items", "order_id"},
 }
 
 func (a *App) printData(w http.ResponseWriter, r *http.Request, id *Identity, site string) {
