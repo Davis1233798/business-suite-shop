@@ -233,3 +233,20 @@ func TestPreviewFramePolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestHealthReportsReleaseRevision(t *testing.T) {
+	t.Setenv("SUITE_RELEASE_SHA", "shop-release-test")
+	a := appForTest(t)
+	w := request(a, "GET", "/api/health", nil)
+	var response struct {
+		Data struct {
+			Revision string `json:"revision"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || response.Data.Revision != "shop-release-test" {
+		t.Fatalf("health: %d %s", w.Code, w.Body)
+	}
+}
