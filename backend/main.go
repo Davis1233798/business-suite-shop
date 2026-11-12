@@ -422,7 +422,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(w, 503, "Database unavailable")
 			return
 		}
-		ok(w, map[string]string{"backend": "go", "status": "ready"})
+		ok(w, map[string]string{"backend": "go", "status": "ready", "revision": os.Getenv("SUITE_RELEASE_SHA")})
 	})
 	mux.HandleFunc("/api/auth/{action}", a.auth)
 	mux.HandleFunc("/api/stations/{site}/traffic", a.trafficAPI)

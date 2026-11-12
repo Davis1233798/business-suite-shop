@@ -7,7 +7,14 @@ permissions:
   packages: write
 jobs:
   shop:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            suffix: ''
+          - runner: ubuntu-24.04-arm
+            suffix: '-arm64'
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +31,7 @@ jobs:
       - run: go -C backend test -race -timeout=20m ./...
       - run: npm run web:build
       - name: Build SHOP image
-        run: docker build -f infra/linux/Dockerfile.station -t shop-ci:${GITHUB_SHA} .
+        run: docker build --build-arg SUITE_RELEASE_SHA="${GITHUB_SHA}" -f infra/linux/Dockerfile.station -t shop-ci:${GITHUB_SHA} .
       - name: Smoke-test isolated SHOP image
         run: |
           set -euo pipefail
@@ -34,7 +41,7 @@ jobs:
             if curl --fail --silent http://127.0.0.1:18095/api/health > /dev/null; then break; fi
             sleep 2
           done
-          curl --fail --silent http://127.0.0.1:18095/api/health > /dev/null
+          curl --fail --silent http://127.0.0.1:18095/api/health | python3 -c 'import json,os,sys; assert json.load(sys.stdin)["data"]["revision"] == os.environ["GITHUB_SHA"]'
           test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:18095/mes/login)" = 404
       - name: Install Chromium for print preview lifecycle acceptance
         run: npx playwright install --with-deps chromium
@@ -48,12 +55,12 @@ jobs:
             if curl --fail --silent http://127.0.0.1:18095/api/health > /dev/null; then break; fi
             sleep 2
           done
-          curl --fail --silent http://127.0.0.1:18095/api/health > /dev/null
+          curl --fail --silent http://127.0.0.1:18095/api/health | python3 -c 'import json,os,sys; assert json.load(sys.stdin)["data"]["revision"] == os.environ["GITHUB_SHA"]'
           npx playwright test --config playwright.lifecycle.config.ts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: shop-print-preview-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          name: shop-print-preview-browser-${{ matrix.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             playwright-report/
             test-results/
@@ -67,5 +74,5 @@ jobs:
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/business-suite-shop-station"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker tag shop-ci:${GITHUB_SHA} "$image:${GITHUB_SHA}"
-          docker push "$image:${GITHUB_SHA}"
+          docker tag shop-ci:${GITHUB_SHA} "$image:${GITHUB_SHA}${{ matrix.suffix }}"
+          docker push "$image:${GITHUB_SHA}${{ matrix.suffix }}"
