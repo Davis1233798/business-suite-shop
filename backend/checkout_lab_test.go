@@ -289,14 +289,18 @@ func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	accepted, duplicates, soldOut := 0, 0, 0
+	first := request(a, http.MethodPost, "/api/stations/shop/checkout-lab", map[string]any{"action": "checkout", "runId": prepared.Data.RunID, "key": "first-buyer"}, admin...)
+	if first.Code != http.StatusOK {
+		t.Fatalf("initial checkout: %d %s", first.Code, first.Body.String())
+	}
+	accepted, duplicates, soldOut := 1, 0, 0
 	for i := 0; i < 32; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			key := fmt.Sprintf("buyer-%d", i)
 			if i%4 == 0 {
-				key = fmt.Sprintf("buyer-%d", i-1)
+				key = "first-buyer"
 			}
 			res := request(a, http.MethodPost, "/api/stations/shop/checkout-lab", map[string]any{"action": "checkout", "runId": prepared.Data.RunID, "key": key}, admin...)
 			var body struct {
@@ -328,7 +332,7 @@ func TestShopCheckoutLabCreatesRealOrdersWithoutOversell(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if accepted != 5 || duplicates == 0 || soldOut == 0 {
+	if accepted != 5 || duplicates != 8 || soldOut != 20 {
 		t.Fatalf("accepted=%d duplicate=%d soldout=%d", accepted, duplicates, soldOut)
 	}
 	var summary struct {
