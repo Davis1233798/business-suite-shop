@@ -19,3 +19,9 @@ Run against real PostgreSQL and the current SQLite baseline. Verify concurrent c
 Validate a restored isolated fixture before migrating legacy records. Reconcile tenant counts and stock balances before enabling writes. Keep the legacy source read-only during reconciliation. After enabling PostgreSQL writes, rolling back requires preserving or reconciling those writes before resuming SQLite.
 
 Status: storage dependencies inventoried. PostgreSQL implementation and real-engine acceptance are pending. The local Docker client cannot currently reach its Linux engine.
+
+## Automated acceptance
+
+One Linux CI job starts a disposable PostgreSQL 16 service and runs the
+Shop transaction tests with the race detector. The native image matrix
+continues to verify the existing SQLite-backed application.
