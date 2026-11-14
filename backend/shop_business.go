@@ -27,7 +27,7 @@ func (a *App) expireShopReservations() error {
 		return e
 	}
 	defer tx.Rollback()
-	rows, e := tx.Query(`SELECT r.id,r.organization_id,r.variant_id,r.quantity,r.cart_id FROM shop_inventory_reservations r JOIN shop_orders o ON o.id=r.cart_id AND o.organization_id=r.organization_id WHERE r.status='active' AND o.payment_status IN ('pending','failed') AND EXISTS (SELECT 1 FROM (SELECT x.organization_id,x.cart_id FROM shop_inventory_reservations x JOIN shop_orders pending ON pending.id=x.cart_id AND pending.organization_id=x.organization_id WHERE x.status='active' AND pending.payment_status IN ('pending','failed') AND datetime(x.expires_at)<=CURRENT_TIMESTAMP GROUP BY x.organization_id,x.cart_id LIMIT 100) expired WHERE expired.organization_id=r.organization_id AND expired.cart_id=r.cart_id)`)
+	rows, e := tx.Query(fmt.Sprintf(`SELECT r.id,r.organization_id,r.variant_id,r.quantity,r.cart_id FROM shop_inventory_reservations r JOIN shop_orders o ON o.id=r.cart_id AND o.organization_id=r.organization_id WHERE r.status='active' AND o.payment_status IN ('pending','failed') AND EXISTS (SELECT 1 FROM (SELECT x.organization_id,x.cart_id FROM shop_inventory_reservations x JOIN shop_orders pending ON pending.id=x.cart_id AND pending.organization_id=x.organization_id WHERE x.status='active' AND pending.payment_status IN ('pending','failed') AND %s GROUP BY x.organization_id,x.cart_id LIMIT 100) expired WHERE expired.organization_id=r.organization_id AND expired.cart_id=r.cart_id)`, shopTimestampPredicate(a.db, "x.expires_at", "<=")))
 	if e != nil {
 		return e
 	}
@@ -218,7 +218,8 @@ func (a *App) shopBusiness(w http.ResponseWriter, r *http.Request, id *Identity,
 			fail(w, 503, "Cannot validate order items")
 			return
 		}
-		if e = tx.QueryRow("SELECT count(*) FROM shop_inventory_reservations WHERE organization_id=? AND cart_id=? AND status='active' AND datetime(expires_at)>CURRENT_TIMESTAMP", id.OrganizationID, orderID).Scan(&active); e != nil {
+		activeExpiry := shopTimestampPredicate(a.db, "expires_at", ">")
+		if e = tx.QueryRow("SELECT count(*) FROM shop_inventory_reservations WHERE organization_id=? AND cart_id=? AND status='active' AND "+activeExpiry, id.OrganizationID, orderID).Scan(&active); e != nil {
 			fail(w, 503, "Cannot validate reservations")
 			return
 		}
@@ -227,7 +228,7 @@ func (a *App) shopBusiness(w http.ResponseWriter, r *http.Request, id *Identity,
 			return
 		}
 		var unmatched int
-		if e = tx.QueryRow(`SELECT count(*) FROM shop_order_items i WHERE i.organization_id=? AND i.order_id=? AND NOT EXISTS (SELECT 1 FROM shop_inventory_reservations r WHERE r.organization_id=i.organization_id AND r.cart_id=i.order_id AND r.variant_id=i.variant_id AND r.quantity=i.quantity AND r.status='active' AND datetime(r.expires_at)>CURRENT_TIMESTAMP)`, id.OrganizationID, orderID).Scan(&unmatched); e != nil {
+		if e = tx.QueryRow(fmt.Sprintf(`SELECT count(*) FROM shop_order_items i WHERE i.organization_id=? AND i.order_id=? AND NOT EXISTS (SELECT 1 FROM shop_inventory_reservations r WHERE r.organization_id=i.organization_id AND r.cart_id=i.order_id AND r.variant_id=i.variant_id AND r.quantity=i.quantity AND r.status='active' AND %s)`, shopTimestampPredicate(a.db, "r.expires_at", ">")), id.OrganizationID, orderID).Scan(&unmatched); e != nil {
 			fail(w, 503, "Cannot match reservations")
 			return
 		}
@@ -235,7 +236,7 @@ func (a *App) shopBusiness(w http.ResponseWriter, r *http.Request, id *Identity,
 			fail(w, 409, "Reservations do not match the order")
 			return
 		}
-		update, err := tx.Exec("UPDATE shop_inventory_reservations SET status='consumed' WHERE organization_id=? AND cart_id=? AND status='active' AND datetime(expires_at)>CURRENT_TIMESTAMP", id.OrganizationID, orderID)
+		update, err := tx.Exec("UPDATE shop_inventory_reservations SET status='consumed' WHERE organization_id=? AND cart_id=? AND status='active' AND "+shopTimestampPredicate(a.db, "expires_at", ">"), id.OrganizationID, orderID)
 		if err != nil {
 			fail(w, 503, "Cannot consume reservation")
 			return

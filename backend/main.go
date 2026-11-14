@@ -276,19 +276,19 @@ func (a *App) initializeDemo(space string) error {
 		return e
 	}
 	defer tx.Rollback()
-	if _, e = tx.Exec("INSERT OR IGNORE INTO organizations(id,name,slug) VALUES(?,?,?)", org, "Isolated demo organization", org); e != nil {
+	if _, e = tx.Exec("INSERT INTO organizations(id,name,slug) VALUES(?,?,?) ON CONFLICT DO NOTHING", org, "Isolated demo organization", org); e != nil {
 		return e
 	}
 	for _, p := range demoPeople {
 		id := org + "_" + strings.Split(p.Email, "@")[0]
-		if _, e = tx.Exec("INSERT OR IGNORE INTO users(id,email,display_name) VALUES(?,?,?)", id, p.Email, p.Name); e != nil {
+		if _, e = tx.Exec("INSERT INTO users(id,email,display_name) VALUES(?,?,?) ON CONFLICT DO NOTHING", id, p.Email, p.Name); e != nil {
 			return e
 		}
-		if _, e = tx.Exec("INSERT OR IGNORE INTO station_accounts(user_id,organization_id,email,password_hash) VALUES(?,?,?,?)", id, org, p.Email, hash); e != nil {
+		if _, e = tx.Exec("INSERT INTO station_accounts(user_id,organization_id,email,password_hash) VALUES(?,?,?,?) ON CONFLICT DO NOTHING", id, org, p.Email, hash); e != nil {
 			return e
 		}
 		for _, s := range []string{repositorySite} {
-			if _, e = tx.Exec("INSERT OR IGNORE INTO station_grants(user_id,site,role,scope) VALUES(?,?,?,?)", id, s, p.Role, p.Scope); e != nil {
+			if _, e = tx.Exec("INSERT INTO station_grants(user_id,site,role,scope) VALUES(?,?,?,?) ON CONFLICT DO NOTHING", id, s, p.Role, p.Scope); e != nil {
 				return e
 			}
 		}
@@ -360,8 +360,9 @@ func (a *App) auth(w http.ResponseWriter, r *http.Request) {
 	// Shared database rate limits cannot be reset with a fresh process or cookie.
 	limitKey := digest(strings.Split(r.RemoteAddr, ":")[0] + "|" + strings.ToLower(input.Email))
 	now := time.Now().UnixMilli()
-	_, e := a.db.Exec(`INSERT INTO station_login_limits(key,attempts,reset_at) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN reset_at<? THEN 1 ELSE attempts+1 END,reset_at=CASE WHEN reset_at<? THEN ? ELSE reset_at END`, limitKey, now+900000, now, now, now+900000)
+	_, e := a.db.Exec(`INSERT INTO station_login_limits(key,attempts,reset_at) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN station_login_limits.reset_at<? THEN 1 ELSE station_login_limits.attempts+1 END,reset_at=CASE WHEN station_login_limits.reset_at<? THEN ? ELSE station_login_limits.reset_at END`, limitKey, now+900000, now, now, now+900000)
 	if e != nil {
+		log.Printf("station sign-in rate-limit update failed: %v", e)
 		fail(w, 503, "Sign-in service is temporarily unavailable")
 		return
 	}
@@ -468,10 +469,12 @@ func main() {
 	if file == "" {
 		file = ".data/shop-repository.sqlite"
 	}
-	if e := os.MkdirAll(filepath.Dir(file), 0700); e != nil {
-		log.Fatal(e)
+	if strings.TrimSpace(os.Getenv("SUITE_DATABASE_URL")) == "" {
+		if e := os.MkdirAll(filepath.Dir(file), 0700); e != nil {
+			log.Fatal(e)
+		}
 	}
-	db, e := openDB(file)
+	db, e := openConfiguredDB(file)
 	if e != nil {
 		log.Fatal(e)
 	}

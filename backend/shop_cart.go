@@ -135,7 +135,11 @@ func (a *App) shopCartCheckout(w http.ResponseWriter, r *http.Request, id *Ident
 		var kind string
 		var value, minSpend int64
 		var enabled, validTime int
-		e = tx.QueryRow("SELECT discount_type,discount_value,min_spend,is_active,CASE WHEN expires_at IS NULL THEN 1 WHEN julianday(expires_at)>julianday('now') THEN 1 ELSE 0 END FROM shop_promotions WHERE organization_id=? AND code=?", id.OrganizationID, in.CouponCode).Scan(&kind, &value, &minSpend, &enabled, &validTime)
+		validExpiry := "CASE WHEN expires_at IS NULL THEN 1 WHEN julianday(expires_at)>julianday('now') THEN 1 ELSE 0 END"
+		if isShopPostgresDB(a.db) {
+			validExpiry = "CASE WHEN expires_at IS NULL THEN 1 WHEN CAST(expires_at AS TIMESTAMPTZ)>CURRENT_TIMESTAMP THEN 1 ELSE 0 END"
+		}
+		e = tx.QueryRow("SELECT discount_type,discount_value,min_spend,is_active,"+validExpiry+" FROM shop_promotions WHERE organization_id=? AND code=?", id.OrganizationID, in.CouponCode).Scan(&kind, &value, &minSpend, &enabled, &validTime)
 		if errors.Is(e, sql.ErrNoRows) {
 			fail(w, 404, "Coupon not found")
 			return

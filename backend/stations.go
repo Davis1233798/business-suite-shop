@@ -69,6 +69,39 @@ func queryMaps(db *sql.DB, query string, args ...any) ([]map[string]any, error) 
 	return out, rows.Err()
 }
 
+func workspaceTableColumns(db *sql.DB, table string) ([]string, error) {
+	var rows *sql.Rows
+	var err error
+	if isShopPostgresDB(db) {
+		rows, err = db.Query("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? ORDER BY ordinal_position", table)
+	} else {
+		rows, err = db.Query("PRAGMA table_info(" + table + ")")
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := []string{}
+	for rows.Next() {
+		if isShopPostgresDB(db) {
+			var name string
+			if err = rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			columns = append(columns, name)
+			continue
+		}
+		var cid, notnull, pk int
+		var name, typ string
+		var defaultValue any
+		if err = rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns = append(columns, name)
+	}
+	return columns, rows.Err()
+}
+
 func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 	site, action := r.PathValue("site"), r.PathValue("action")
 	if !knownSite(site) {
@@ -134,7 +167,7 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 			if front {
 				columns = strings.Join(d.Front, ",")
 				if site == "shop" && d.Key == "variants" {
-					columns += ",MAX(stock_quantity-reserved_quantity,0) AS available_quantity"
+					columns += ",CASE WHEN stock_quantity-reserved_quantity>0 THEN stock_quantity-reserved_quantity ELSE 0 END AS available_quantity"
 				}
 			}
 			query := "SELECT " + columns + " FROM " + d.Table + " WHERE organization_id=?"
@@ -160,36 +193,24 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 			if search != "" {
 				searchColumns := d.Front
 				if !front {
-					searchColumns = nil
-					info, err := a.db.Query("PRAGMA table_info(" + d.Table + ")")
+					allColumns, err := workspaceTableColumns(a.db, d.Table)
 					if err != nil {
 						fail(w, 500, "Unable to search workspace data")
 						return
 					}
-					for info.Next() {
-						var cid, notnull, pk int
-						var name, typ string
-						var defaultValue any
-						if err = info.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
-							break
-						}
+					searchColumns = nil
+					for _, name := range allColumns {
 						if name != "organization_id" {
 							searchColumns = append(searchColumns, name)
 						}
 					}
-					if err == nil {
-						err = info.Err()
-					}
-					info.Close()
-					if err != nil {
-						fail(w, 500, "Unable to search workspace data")
-						return
-					}
 				}
 				terms := make([]string, 0, len(searchColumns))
+				searchValue := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(search)
 				for _, column := range searchColumns {
-					terms = append(terms, "instr(lower(CAST(\""+strings.ReplaceAll(column, "\"", "\"\"")+"\" AS TEXT)), lower(?)) > 0")
-					args = append(args, search)
+					quotedColumn := `"` + strings.ReplaceAll(column, `"`, `""`) + `"`
+					terms = append(terms, "lower(CAST("+quotedColumn+" AS TEXT)) LIKE lower(?) ESCAPE '\\'")
+					args = append(args, "%"+searchValue+"%")
 				}
 				if len(terms) == 0 {
 					fail(w, 400, "Dataset cannot be searched")
@@ -198,7 +219,7 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 				query += " AND (" + strings.Join(terms, " OR ") + ")"
 			}
 			args = append(args, offset)
-			rows, err := queryMaps(a.db, query+" ORDER BY rowid DESC LIMIT 500 OFFSET ?", args...)
+			rows, err := queryMaps(a.db, query+" ORDER BY id DESC LIMIT 500 OFFSET ?", args...)
 			if err != nil {
 				fail(w, 500, "Unable to read workspace data: "+d.Key)
 				return
@@ -214,7 +235,7 @@ func (a *App) stationAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if site == "shop" && !front {
-			events, err := queryMaps(a.db, "SELECT id,status,retry_count,created_at FROM outbox_events WHERE organization_id=? AND event_type='shop.paid' ORDER BY rowid DESC LIMIT 100", id.OrganizationID)
+			events, err := queryMaps(a.db, "SELECT id,status,retry_count,created_at FROM outbox_events WHERE organization_id=? AND event_type='shop.paid' ORDER BY created_at DESC,id DESC LIMIT 100", id.OrganizationID)
 			if err != nil {
 				fail(w, 500, "Unable to read commerce events")
 				return

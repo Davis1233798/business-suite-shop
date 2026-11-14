@@ -67,7 +67,11 @@ func simulateShopPayment(db *sql.DB, organizationID, actorID, actorRole string, 
 	defer tx.Rollback()
 	var orderOwner, paymentStatus string
 	var amount int
-	err = tx.QueryRow("SELECT COALESCE(user_id, ''),total_amount,payment_status FROM shop_orders WHERE id=? AND organization_id=?", in.OrderID, organizationID).Scan(&orderOwner, &amount, &paymentStatus)
+	orderQuery := "SELECT COALESCE(user_id, ''),total_amount,payment_status FROM shop_orders WHERE id=? AND organization_id=?"
+	if isShopPostgresDB(db) {
+		orderQuery += " FOR UPDATE"
+	}
+	err = tx.QueryRow(orderQuery, in.OrderID, organizationID).Scan(&orderOwner, &amount, &paymentStatus)
 	if err == sql.ErrNoRows {
 		return paymentCallbackResult{}, errPaymentNotFound
 	}

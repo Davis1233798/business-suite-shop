@@ -77,3 +77,33 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker tag shop-ci:${GITHUB_SHA} "$image:${GITHUB_SHA}${{ matrix.suffix }}"
           docker push "$image:${GITHUB_SHA}${{ matrix.suffix }}"
+  postgres-pilot:
+    name: Verify Shop transactions on PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: shop_test
+          POSTGRES_PASSWORD: shop_test
+          POSTGRES_DB: shop_pilot
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U shop_test -d shop_pilot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Run PostgreSQL transaction tests
+        env:
+          SHOP_POSTGRES_TEST_URL: postgres://shop_test:shop_test@127.0.0.1:${{ job.services.postgres.ports[5432] }}/shop_pilot?sslmode=disable
+        run: go -C backend test -race -run '^TestShopPostgres' -count=1 -v
