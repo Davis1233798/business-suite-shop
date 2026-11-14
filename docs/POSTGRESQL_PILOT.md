@@ -1,27 +1,76 @@
 # Shop PostgreSQL pilot
 
-## Architecture
+## Current scope
 
-Use PostgreSQL as the Shop Web transaction store on OCI. Give Shop its own database, migration role and runtime role. Keep the analytics databases separate from checkout authority. SQLite remains available for existing local development and checkout lab fixtures until those paths have equivalent PostgreSQL coverage.
+The Go Shop application can use PostgreSQL by setting `SUITE_DATABASE_URL`.
+When it is unset, the existing SQLite path (`SUITE_DB`, defaulting to
+`.data/shop-repository.sqlite`) remains active. The PostgreSQL schema is an
+additive, idempotent version 2 migration in
+`backend/migrations/shop_postgres_initial.sql`. Login, demo fixture seeding,
+Shop catalog and workspace reads, checkout, payment, shipment, refunds,
+after-sales, operations snapshots, print data, and the traffic rehearsal use
+the database selected at application startup.
 
-## Program boundary
+The checkout lab is a separate in-memory SQLite rehearsal. It does not read or
+write authoritative Shop data. This remains an explicit local simulation
+boundary until that lab has equivalent PostgreSQL coverage.
 
-Inventory, reservations, orders, payment callbacks and their outbox writes must share one authoritative transaction store. Do not split a live checkout across SQLite and PostgreSQL. Keep the HTTP contract and integer money representation. Scope keys and relationships by organization. Migrations run separately from the runtime role.
+No existing SQLite business records are copied to PostgreSQL. Demo fixture
+rows are seeded into the selected store when a demo workspace is initialized;
+this is not a legacy data migration. Importing a restored SQLite database is a
+separate, future operation that needs its own mapping, tenant reconciliation,
+stock reconciliation, and rollback plan.
 
-Replace SQLite bootstrap, schema introspection, insert-ignore syntax, and text timestamp comparisons at the storage boundary. A PostgreSQL connection pool permits overlapping writes. Preserve conditional stock updates, serialize competing changes to an order, and enforce uniqueness for checkout retries and payment event IDs in the database.
+## Local PostgreSQL use
 
-## Tests before implementation
+Use a disposable database for the integration tests because they create schema
+and test rows:
 
-Run against real PostgreSQL and the current SQLite baseline. Verify concurrent checkout cannot oversell, replay of an accepted checkout creates one order, competing payment callbacks produce one effective transition, and a failed outbox write rolls back the transaction. Include another tenant using the same request key and verify that stock and orders stay isolated. Run the migration twice and verify restored data, row reconciliation and application restart.
+```powershell
+$env:SHOP_POSTGRES_TEST_URL = "postgres://shop_test:password@127.0.0.1:5432/shop_test?sslmode=disable"
+go -C backend test ./... -count=1
+```
 
-## Rollout
+To run the Go application against PostgreSQL, set `SUITE_DATABASE_URL` to a
+Shop database URL before starting it. The application runs the idempotent
+schema migration at startup using that URL. The current bootstrap therefore
+requires DDL privileges on this connection; use an isolated pilot database
+and resolve migration-role separation before a production cutover.
 
-Validate a restored isolated fixture before migrating legacy records. Reconcile tenant counts and stock balances before enabling writes. Keep the legacy source read-only during reconciliation. After enabling PostgreSQL writes, rolling back requires preserving or reconciling those writes before resuming SQLite.
+## Transaction boundary
 
-Status: storage dependencies inventoried. PostgreSQL implementation and real-engine acceptance are pending. The local Docker client cannot currently reach its Linux engine.
+Inventory, reservations, orders, payment callbacks and their outbox writes must
+share one authoritative transaction store. Do not split a live checkout
+across SQLite and PostgreSQL. Keep the HTTP contract and integer money
+representation. Scope keys and relationships by organization. Use conditional
+stock updates, serialize competing order changes, and enforce checkout retry
+and payment event uniqueness in the database.
 
-## Automated acceptance
+Analytics databases remain separate from checkout authority. PostgreSQL
+connection pooling allows overlapping writes. The web integration acceptance
+exercises login and session creation, tenant-scoped reads and search, checkout,
+payment, shipping, refund, review, print, operations snapshots, business
+checkout/payment/shipping, and traffic prepare/submit/drain.
 
-One Linux CI job starts a disposable PostgreSQL 16 service and runs the
-Shop transaction tests with the race detector. The native image matrix
-continues to verify the existing SQLite-backed application.
+## Acceptance evidence
+
+Run the test suite once with no PostgreSQL URL to retain the SQLite baseline,
+then with `SHOP_POSTGRES_TEST_URL` pointing at a disposable PostgreSQL 16
+database. The real-engine tests cover concurrent checkout without overselling,
+checkout replay, tenant-scoped keys, competing payment callbacks with one paid
+outbox transition, failed outbox rollback, repeated migration, and data
+surviving application-store reopen. The PostgreSQL web test exercises the
+application storage selector and the station APIs listed above.
+
+CI runs the transaction tests on a disposable PostgreSQL 16 service. The
+native image matrix continues to verify the SQLite-backed application.
+
+## Rollout boundary
+
+This pilot does not migrate legacy records or enable production writes. Before
+cutover, migrate an isolated restored fixture separately, reconcile tenant
+counts and stock balances, keep the legacy source read-only during
+reconciliation, and validate a write rollback procedure. After PostgreSQL
+writes begin, rollback requires preserving or reconciling those writes before
+resuming SQLite. Production deployment also needs separate migration and
+runtime roles and live OCI routing, DNS, and TLS validation.
