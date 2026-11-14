@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -32,9 +33,17 @@ func validatePortfolioShopSnapshot(ctx context.Context, db *sql.DB) error {
 		table, expected, _ := strings.Cut(entry, ":")
 		var actual string
 		err := db.QueryRowContext(ctx, `SELECT COALESCE(group_concat(name || ':' || upper(type), ','), '') FROM (SELECT name,type FROM pragma_table_info(?) ORDER BY cid)`, table).Scan(&actual)
-		if err != nil || actual != expected {
+		if err != nil || !sameShopColumns(actual, expected) {
 			return fmt.Errorf("unsupported Portfolio SQLite layout for %s", table)
 		}
 	}
 	return nil
+}
+
+func sameShopColumns(actual, expected string) bool {
+	actualColumns := strings.Split(actual, ",")
+	expectedColumns := strings.Split(expected, ",")
+	slices.Sort(actualColumns)
+	slices.Sort(expectedColumns)
+	return slices.Equal(actualColumns, expectedColumns)
 }
