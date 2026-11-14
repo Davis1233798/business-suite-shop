@@ -249,3 +249,43 @@ func TestShopSQLiteImportRollsBackAtomicallyAndReplays(t *testing.T) {
 		t.Fatalf("replay duplicated records: rows=%d err=%v", imported, err)
 	}
 }
+
+func TestShopPortfolioImportPreservesLegacyOrders(t *testing.T) {
+	target, dsn := shopMigrationPostgresTarget(t)
+	path, source := createShopMigrationSource(t)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("DROP TABLE shop_repository_schema; ALTER TABLE shop_orders DROP COLUMN coupon_code; ALTER TABLE shop_payment_attempts DROP COLUMN actor_id; ALTER TABLE shop_payment_attempts DROP COLUMN actor_role")
+	closeErr := db.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("prepare legacy fixture: %v / %v", err, closeErr)
+	}
+	if _, err := target.Exec("INSERT INTO organizations(id,name,slug) VALUES(?,?,?)", source.orgID, "Imported tenant", source.orgID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.Exec("INSERT INTO users(id,email,display_name) VALUES(?,?,?)", source.userID, "import@example.invalid", "Imported user"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(shopDataMigrationManifest{TenantMappings: map[string]string{source.orgID: source.orgID}, UserMappings: map[string]string{source.userID: source.userID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result bytes.Buffer
+	if err := runShopMigration([]string{"--apply", path}, bytes.NewReader(manifest), &result, dsn); err != nil {
+		t.Fatal(err)
+	}
+	var total, stock, reserved int
+	var coupon sql.NullString
+	if err := target.QueryRow("SELECT total_amount,coupon_code FROM shop_orders WHERE id=?", source.orderID).Scan(&total, &coupon); err != nil || total != 285 || coupon.Valid {
+		t.Fatalf("legacy order: total=%d coupon=%v err=%v", total, coupon, err)
+	}
+	if err := target.QueryRow("SELECT stock_quantity,reserved_quantity FROM shop_variants WHERE id=?", source.variantID).Scan(&stock, &reserved); err != nil || stock != 17 || reserved != 2 {
+		t.Fatalf("legacy stock: %d/%d err=%v", stock, reserved, err)
+	}
+	var actor, role string
+	if err := target.QueryRow("SELECT actor_id,actor_role FROM shop_payment_attempts WHERE order_id=?", source.orderID).Scan(&actor, &role); err != nil || actor != "" || role != "" {
+		t.Fatalf("legacy payment actor: %q/%q err=%v", actor, role, err)
+	}
+}

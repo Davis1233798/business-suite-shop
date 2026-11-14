@@ -90,3 +90,15 @@ destination and provision the mapped identities before import. Stop writes
 before taking the source snapshot and keep the destination offline until
 reconciliation succeeds. The command exits nonzero on failure and prints
 the migration fingerprint and reconciliation result on success.
+
+### Portfolio source boundary
+
+The shared Portfolio database has no shop_repository_schema marker.
+Before enabling it as an import source, verify its table layout explicitly.
+Legacy orders omit coupon_code, and payment attempts omit actor_id and
+actor_role. Preserve the historical rows using the destination defaults
+for these absent fields, with no inferred coupon or payment actor.
+Validate the approved organization and user mappings separately from
+source schema validation. Exercise both snapshot formats against a
+disposable PostgreSQL database and verify atomic rejection of an
+unexpected source layout.

@@ -106,4 +106,4 @@ jobs:
       - name: Run PostgreSQL transaction tests
         env:
           SHOP_POSTGRES_TEST_URL: postgres://shop_test:shop_test@127.0.0.1:${{ job.services.postgres.ports[5432] }}/shop_pilot?sslmode=disable
-        run: go -C backend test -race -run '^TestShop(Postgres|SQLiteImport)' -count=1 -v
+        run: go -C backend test -race -run '^TestShop(Postgres|SQLiteImport|Portfolio)' -count=1 -v
