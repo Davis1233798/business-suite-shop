@@ -208,10 +208,7 @@ func shopTimestampPredicate(db *sql.DB, column, operator string) string {
 // openShopPostgresDB opens a Shop PostgreSQL store. The application entry point
 // uses SUITE_DATABASE_URL to opt into it; an unset URL retains SQLite behavior.
 func openShopPostgresDB(dsn string) (*sql.DB, error) {
-	registerShopPostgresDriver.Do(func() {
-		sql.Register("shop-postgres", &shopPostgresDriver{base: stdlib.GetDefaultDriver()})
-	})
-	db, err := sql.Open("shop-postgres", dsn)
+	db, err := connectShopPostgres(dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -269,3 +266,10 @@ var shopPostgresInitialSchema = func() string {
 	}
 	return string(content)
 }()
+
+func connectShopPostgres(dsn string) (*sql.DB, error) {
+	registerShopPostgresDriver.Do(func() {
+		sql.Register("shop-postgres", &shopPostgresDriver{base: stdlib.GetDefaultDriver()})
+	})
+	return sql.Open("shop-postgres", dsn)
+}
