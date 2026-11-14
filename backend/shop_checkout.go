@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"regexp"
@@ -20,18 +21,24 @@ func releaseExpiredShopReservations(db *sql.DB, organizationID string, now time.
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT r.id,r.variant_id,r.quantity,r.cart_id,COALESCE(o.payment_status,'') FROM shop_inventory_reservations r LEFT JOIN shop_orders o ON o.id=r.cart_id AND o.organization_id=r.organization_id WHERE r.organization_id=? AND r.session_id LIKE 'shop-go-checkout:%' AND r.status='active' AND datetime(r.expires_at)<=datetime(?)`, organizationID, now.UTC().Format(time.RFC3339Nano))
+	query := `SELECT r.id,r.variant_id,r.quantity,r.cart_id,COALESCE(o.payment_status,''),r.expires_at FROM shop_inventory_reservations r LEFT JOIN shop_orders o ON o.id=r.cart_id AND o.organization_id=r.organization_id WHERE r.organization_id=? AND r.session_id LIKE 'shop-go-checkout:%' AND r.status='active'`
+	args := []any{organizationID}
+	if !isShopPostgresDB(db) {
+		query += " AND datetime(r.expires_at)<=datetime(?)"
+		args = append(args, now.UTC().Format(time.RFC3339Nano))
+	}
+	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return err
 	}
 	type expiredReservation struct {
-		id, variant, orderID, payment string
-		quantity                      int
+		id, variant, orderID, payment, expiresAt string
+		quantity                                 int
 	}
 	expired := []expiredReservation{}
 	for rows.Next() {
 		var item expiredReservation
-		if err = rows.Scan(&item.id, &item.variant, &item.quantity, &item.orderID, &item.payment); err != nil {
+		if err = rows.Scan(&item.id, &item.variant, &item.quantity, &item.orderID, &item.payment, &item.expiresAt); err != nil {
 			rows.Close()
 			return err
 		}
@@ -42,7 +49,17 @@ func releaseExpiredShopReservations(db *sql.DB, organizationID string, now time.
 		return err
 	}
 	rows.Close()
+	expiredReservations := expired[:0]
 	for _, item := range expired {
+		deadline, parseErr := parseShopCouponExpiry(strings.TrimSpace(item.expiresAt))
+		if parseErr != nil {
+			return fmt.Errorf("invalid Shop reservation expiry: %w", parseErr)
+		}
+		if !deadline.After(now) {
+			expiredReservations = append(expiredReservations, item)
+		}
+	}
+	for _, item := range expiredReservations {
 		status := "expired"
 		if item.payment == "paid" {
 			status = "consumed"
@@ -247,6 +264,11 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 		return nil, err
 	}
 	defer tx.Rollback()
+	if isShopPostgresDB(db) {
+		if _, err = tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))", organizationID, "shop_checkout:"+in.Key); err != nil {
+			return nil, err
+		}
+	}
 	var oldHash, oldBody string
 	err = tx.QueryRow("SELECT request_hash,response_body FROM idempotency_keys WHERE organization_id=? AND key=? AND endpoint='shop_checkout'", organizationID, in.Key).Scan(&oldHash, &oldBody)
 	if err == nil {
