@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-func shopMigrationPostgresTarget(t *testing.T) *sql.DB {
+func shopMigrationPostgresTarget(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	dsn := os.Getenv("SHOP_POSTGRES_TEST_URL")
 	if dsn == "" {
@@ -46,7 +48,7 @@ func shopMigrationPostgresTarget(t *testing.T) *sql.DB {
 			_ = cleanup.Close()
 		}
 	})
-	return db
+	return db, parsed.String()
 }
 
 type shopMigrationSource struct {
@@ -102,7 +104,7 @@ func createShopMigrationSource(t *testing.T) (string, shopMigrationSource) {
 }
 
 func TestShopSQLiteImportMapsTenantAndUsersWithoutAuthSecrets(t *testing.T) {
-	target := shopMigrationPostgresTarget(t)
+	target, dsn := shopMigrationPostgresTarget(t)
 	sourcePath, source := createShopMigrationSource(t)
 	destOrg, destUser := "dest-"+source.orgID, "dest-"+source.userID
 	for _, statement := range []struct {
@@ -118,7 +120,16 @@ func TestShopSQLiteImportMapsTenantAndUsersWithoutAuthSecrets(t *testing.T) {
 		}
 	}
 	manifest := shopDataMigrationManifest{TenantMappings: map[string]string{source.orgID: destOrg}, UserMappings: map[string]string{source.userID: destUser}}
-	result, err := migrateShopSQLiteData(sourcePath, target, manifest)
+	input, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runShopMigration([]string{"--apply", sourcePath}, bytes.NewReader(input), &output, dsn); err != nil {
+		t.Fatal(err)
+	}
+	var result shopDataMigrationResult
+	err = json.Unmarshal(output.Bytes(), &result)
 	if err != nil {
 		t.Fatalf("migrate Shop records: %v", err)
 	}
@@ -193,7 +204,7 @@ func TestShopSQLiteImportMapsTenantAndUsersWithoutAuthSecrets(t *testing.T) {
 }
 
 func TestShopSQLiteImportRollsBackAtomicallyAndReplays(t *testing.T) {
-	target := shopMigrationPostgresTarget(t)
+	target, _ := shopMigrationPostgresTarget(t)
 	sourcePath, source := createShopMigrationSource(t)
 	destOrg, destUser := "dest-"+source.orgID, "dest-"+source.userID
 	if _, err := target.Exec("INSERT INTO organizations(id,name,slug) VALUES(?,?,?)", destOrg, "Mapped destination", "dest-"+source.orgID); err != nil {
