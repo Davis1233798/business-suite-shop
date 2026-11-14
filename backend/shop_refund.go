@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -238,6 +239,7 @@ func (a *App) shopRefundAPI(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errShopRefundConflict):
 		fail(w, 409, err.Error())
 	default:
+		log.Printf("Shop refund transaction failed: %v", err)
 		fail(w, 503, "Refund transaction failed")
 	}
 }

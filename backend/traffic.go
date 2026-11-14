@@ -59,7 +59,7 @@ func (a *App) trafficAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback()
-		_, e = tx.Exec("DELETE FROM traffic_runs WHERE organization_id=? AND site=? AND id NOT IN (SELECT id FROM traffic_runs WHERE organization_id=? AND site=? ORDER BY created_at DESC,rowid DESC LIMIT 9)", id.OrganizationID, site, id.OrganizationID, site)
+		_, e = tx.Exec("DELETE FROM traffic_runs WHERE organization_id=? AND site=? AND id NOT IN (SELECT id FROM traffic_runs WHERE organization_id=? AND site=? ORDER BY created_at DESC,id DESC LIMIT 9)", id.OrganizationID, site, id.OrganizationID, site)
 		runID = token()
 		if e == nil {
 			_, e = tx.Exec("INSERT INTO traffic_runs(id,organization_id,site,capacity) VALUES(?,?,?,?)", runID, id.OrganizationID, site, input.Capacity)

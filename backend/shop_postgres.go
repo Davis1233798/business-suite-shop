@@ -7,6 +7,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -197,8 +198,15 @@ func isShopPostgresDB(db *sql.DB) bool {
 	return ok
 }
 
-// openShopPostgresDB opens an isolated Shop PostgreSQL store. SQLite remains the
-// default repository store until the remaining Shop endpoints have PG coverage.
+func shopTimestampPredicate(db *sql.DB, column, operator string) string {
+	if isShopPostgresDB(db) {
+		return fmt.Sprintf("CAST(%s AS TIMESTAMPTZ) %s CURRENT_TIMESTAMP", column, operator)
+	}
+	return fmt.Sprintf("datetime(%s) %s CURRENT_TIMESTAMP", column, operator)
+}
+
+// openShopPostgresDB opens a Shop PostgreSQL store. The application entry point
+// uses SUITE_DATABASE_URL to opt into it; an unset URL retains SQLite behavior.
 func openShopPostgresDB(dsn string) (*sql.DB, error) {
 	registerShopPostgresDriver.Do(func() {
 		sql.Register("shop-postgres", &shopPostgresDriver{base: stdlib.GetDefaultDriver()})
@@ -220,6 +228,13 @@ func openShopPostgresDB(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
+func openConfiguredDB(sqliteFile string) (*sql.DB, error) {
+	if dsn := strings.TrimSpace(os.Getenv("SUITE_DATABASE_URL")); dsn != "" {
+		return openShopPostgresDB(dsn)
+	}
+	return openDB(sqliteFile)
+}
+
 func migrateShopPostgres(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -232,7 +247,10 @@ func migrateShopPostgres(db *sql.DB) error {
 	if _, err = tx.Exec(shopPostgresInitialSchema); err != nil {
 		return fmt.Errorf("Shop PostgreSQL migration: %w", err)
 	}
-	if _, err = tx.Exec(`INSERT INTO shop_repository_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema)`); err != nil {
+	if _, err = tx.Exec(`INSERT INTO shop_repository_schema(version) SELECT 2 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE shop_repository_schema SET version=2 WHERE version<2`); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
