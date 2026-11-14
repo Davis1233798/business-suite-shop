@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -56,5 +58,34 @@ func TestShopSQLiteSnapshotRequiresSupportedSchema(t *testing.T) {
 	}
 	if err := validateShopSQLiteSnapshot(ctx, db); err == nil {
 		t.Fatal("unsupported database version accepted")
+	}
+}
+
+func TestShopPortfolioSnapshotLayout(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, entry := range strings.Split(strings.TrimSpace(portfolioShopLayout), "\n") {
+		table, layout, _ := strings.Cut(entry, ":")
+		columns := strings.Split(layout, ",")
+		for i, column := range columns {
+			name, kind, _ := strings.Cut(column, ":")
+			columns[i] = fmt.Sprintf("%q %s", name, kind)
+		}
+		if _, err := db.Exec("CREATE TABLE " + table + " (" + strings.Join(columns, ",") + ")"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := validateShopSQLiteSnapshot(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("ALTER TABLE shop_orders ADD COLUMN unexpected TEXT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateShopSQLiteSnapshot(ctx, db); err == nil {
+		t.Fatal("unexpected column accepted")
 	}
 }

@@ -38,6 +38,13 @@ func openShopSQLiteSnapshot(ctx context.Context, path string) (*sql.DB, error) {
 }
 
 func validateShopSQLiteSnapshot(ctx context.Context, db *sql.DB) error {
+	var marker bool
+	if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name='shop_repository_schema')").Scan(&marker); err != nil {
+		return err
+	}
+	if !marker {
+		return validatePortfolioShopSnapshot(ctx, db)
+	}
 	var count, version int
 	if err := db.QueryRowContext(ctx, "SELECT count(*), COALESCE(MAX(version), 0) FROM shop_repository_schema").Scan(&count, &version); err != nil || count != 1 || version != 3 {
 		return errors.New("Shop SQLite snapshot must use repository schema version 3")
