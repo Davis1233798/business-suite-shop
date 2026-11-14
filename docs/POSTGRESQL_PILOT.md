@@ -74,3 +74,9 @@ reconciliation, and validate a write rollback procedure. After PostgreSQL
 writes begin, rollback requires preserving or reconciling those writes before
 resuming SQLite. Production deployment also needs separate migration and
 runtime roles and live OCI routing, DNS, and TLS validation.
+
+## Offline migration contract
+
+Import a consistent SQLite snapshot into an initialized PostgreSQL Shop database. The operator must supply explicit source-to-destination organization and user mappings. Destination accounts must already exist. Preserve order references and inventory balances, and exclude credentials, sessions, and login limits.
+
+Validate mappings and reconcile per-tenant row counts, order totals, and available and reserved quantities before committing. Apply all writes and the receipt in one transaction. A retry with the same source fingerprint and mappings returns the recorded result. An unexpected collision aborts the transaction. Keep the source snapshot available until cutover is verified.
