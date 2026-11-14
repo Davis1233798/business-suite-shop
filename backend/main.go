@@ -453,6 +453,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.ServeHTTP(w, r)
 }
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--migrate-shop-sqlite" {
+		if err := runShopMigration(os.Args[2:], os.Stdin, os.Stdout, os.Getenv("SUITE_DATABASE_URL")); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--healthcheck" {
 		client := &http.Client{Timeout: 3 * time.Second}
 		response, err := client.Get("http://127.0.0.1:8095/api/health")
