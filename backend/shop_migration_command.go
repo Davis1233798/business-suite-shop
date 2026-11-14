@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
+
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,7 +27,7 @@ func runShopMigration(args []string, input io.Reader, output io.Writer, dsn stri
 	if strings.TrimSpace(dsn) == "" {
 		return errors.New("SUITE_DATABASE_URL is required")
 	}
-	target, err := sql.Open("shop-postgres", dsn)
+	target, err := connectShopPostgres(dsn)
 	if err != nil {
 		return errors.New("could not initialize PostgreSQL connection")
 	}
