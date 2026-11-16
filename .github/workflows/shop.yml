@@ -5,7 +5,6 @@ on:
   pull_request:
 permissions:
   contents: read
-  packages: write
 jobs:
   shop:
     strategy:
@@ -30,6 +29,7 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm test
       - run: go -C backend test -race -timeout=20m ./...
+      - run: python3 -m unittest infra.tests.test_shop_oci_rollback -v
       - run: npm run web:build
       - name: Build SHOP image
         run: docker build --build-arg SUITE_RELEASE_SHA="${GITHUB_SHA}" -f infra/linux/Dockerfile.station -t shop-ci:${GITHUB_SHA} .
@@ -44,6 +44,10 @@ jobs:
           done
           curl --fail --silent http://127.0.0.1:18095/api/health | python3 -c 'import json,os,sys; assert json.load(sys.stdin)["data"]["revision"] == os.environ["GITHUB_SHA"]'
           test "$(curl --silent -o /dev/null -w '%{http_code}' http://127.0.0.1:18095/mes/login)" = 404
+      - name: Verify isolated Shop candidate lifecycle with synthetic data
+        env:
+          SHOP_CANDIDATE_TEST_IMAGE: shop-ci:${{ github.sha }}
+        run: python3 infra/oci/shop-candidate/smoke_test.py
       - name: Install Chromium for print preview lifecycle acceptance
         run: npx playwright install --with-deps chromium
       - name: Verify print preview request cancellation in the SHOP image
@@ -67,16 +71,74 @@ jobs:
             test-results/
           if-no-files-found: ignore
           retention-days: 7
-      - name: Publish SHOP image on main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  publish-shop-images:
+    name: Publish validated SHOP image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [shop]
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            suffix: ''
+          - runner: ubuntu-24.04-arm
+            suffix: '-arm64'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm run install:ci
+      - run: npm run web:build
+      - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build the architecture image
+        shell: bash
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/business-suite-shop-station"
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker tag shop-ci:${GITHUB_SHA} "$image:${GITHUB_SHA}${{ matrix.suffix }}"
+          docker build --build-arg SUITE_RELEASE_SHA="${GITHUB_SHA}" -f infra/linux/Dockerfile.station -t "shop-ci:${GITHUB_SHA}" .
+          test "$(docker image inspect "shop-ci:${GITHUB_SHA}" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$GITHUB_SHA"
+      - name: Smoke-test the exact image before publication
+        env:
+          SHOP_CANDIDATE_TEST_IMAGE: shop-ci:${{ github.sha }}
+        run: python3 infra/oci/shop-candidate/smoke_test.py
+      - name: Publish the tested architecture image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/business-suite-shop-station"
+          docker tag "shop-ci:${GITHUB_SHA}" "$image:${GITHUB_SHA}${{ matrix.suffix }}"
           docker push "$image:${GITHUB_SHA}${{ matrix.suffix }}"
+  publish-candidate-index:
+    name: Publish immutable Shop candidate image index
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [publish-shop-images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Publish multi-architecture private candidate tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/business-suite-shop-station"
+          docker manifest create "$image:${GITHUB_SHA}-private-candidate" \
+            "$image:${GITHUB_SHA}" "$image:${GITHUB_SHA}-arm64"
+          docker manifest push --purge "$image:${GITHUB_SHA}-private-candidate"
+          docker manifest inspect "$image:${GITHUB_SHA}-private-candidate" > candidate-index.json
+          python3 -c 'import json,sys; value=json.load(open("candidate-index.json")); assert {item["platform"]["architecture"] for item in value["manifests"]} >= {"amd64", "arm64"}'
+          docker buildx imagetools inspect "$image:${GITHUB_SHA}-private-candidate" --format '{{json .Manifest.Digest}}' | python3 -c 'import re,sys; value=sys.stdin.read().strip().strip("\""); assert re.fullmatch(r"sha256:[0-9a-f]{64}", value), value; print(value)'
   postgres-pilot:
     name: Verify Shop transactions on PostgreSQL
     runs-on: ubuntu-latest
