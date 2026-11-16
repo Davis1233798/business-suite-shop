@@ -94,6 +94,7 @@ def compose(project: str, env: dict[str, str], *args: str) -> str:
 def candidate_diagnostics(project: str, env: dict[str, str]) -> str:
     reports = []
     for args in (
+        ("config", "--format", "json"),
         ("ps", "--all"),
         ("port", "shop-candidate", "8095"),
         ("logs", "--no-color", "shop-candidate"),
@@ -118,6 +119,15 @@ def candidate_diagnostics(project: str, env: dict[str, str]) -> str:
 
 def exercise_order(image: str, revision: str, port: int, project: str, volume: str, network: str, owner: str) -> tuple[str, str]:
     env = make_project_env(image, revision, port, volume, network, owner)
+    resolved = json.loads(compose(project, env, "config", "--format", "json"))
+    mappings = resolved.get("services", {}).get("shop-candidate", {}).get("ports", [])
+    if not any(
+        mapping.get("host_ip") == "127.0.0.1"
+        and str(mapping.get("published")) == str(port)
+        and int(mapping.get("target", 0)) == 8095
+        for mapping in mappings
+    ):
+        raise RuntimeError(f"resolved Compose config has no loopback port mapping for candidate port {port}: {mappings!r}")
     compose(project, env, "up", "-d", "--wait", "--wait-timeout", "180", "shop-candidate")
     base = f"http://127.0.0.1:{port}"
     client = CandidateClient(base)
