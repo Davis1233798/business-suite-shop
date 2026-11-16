@@ -91,12 +91,40 @@ def compose(project: str, env: dict[str, str], *args: str) -> str:
     return run(["docker", "compose", "--project-name", project, "-f", str(COMPOSE_FILE), *args], env=env)
 
 
+def candidate_diagnostics(project: str, env: dict[str, str]) -> str:
+    reports = []
+    for args in (
+        ("ps", "--all"),
+        ("port", "shop-candidate", "8095"),
+        ("logs", "--no-color", "shop-candidate"),
+    ):
+        result = subprocess.run(
+            ["docker", "compose", "--project-name", project, "-f", str(COMPOSE_FILE), *args],
+            env=env, text=True, capture_output=True,
+        )
+        reports.append(f"$ docker compose {' '.join(args)} (exit {result.returncode})\n{result.stdout}{result.stderr}")
+    container = subprocess.run(
+        ["docker", "compose", "--project-name", project, "-f", str(COMPOSE_FILE), "ps", "-q", "shop-candidate"],
+        env=env, text=True, capture_output=True,
+    ).stdout.strip()
+    if container:
+        inspect = subprocess.run(
+            ["docker", "inspect", container, "--format", '{{json .NetworkSettings.Ports}} {{json .State}}'],
+            env=env, text=True, capture_output=True,
+        )
+        reports.append(f"$ docker inspect (exit {inspect.returncode})\n{inspect.stdout}{inspect.stderr}")
+    return "\n".join(reports)
+
+
 def exercise_order(image: str, revision: str, port: int, project: str, volume: str, network: str, owner: str) -> tuple[str, str]:
     env = make_project_env(image, revision, port, volume, network, owner)
     compose(project, env, "up", "-d", "--wait", "--wait-timeout", "180", "shop-candidate")
     base = f"http://127.0.0.1:{port}"
     client = CandidateClient(base)
-    wait_for_revision(client, revision)
+    try:
+        wait_for_revision(client, revision)
+    except RuntimeError as error:
+        raise RuntimeError(f"{error}\nCandidate diagnostics:\n{candidate_diagnostics(project, env)}") from error
 
     unauthenticated_status, _ = client.request(
         "POST",
