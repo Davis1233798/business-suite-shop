@@ -52,7 +52,7 @@ if args[:1] == ["pull"]:
     pass
 elif args[:2] == ["image", "inspect"]:
     image, fmt = args[2], args[4]
-    if ".Architecture" in fmt: print("amd64")
+    if ".Architecture" in fmt: print("arm64" if os.uname().machine in ("aarch64", "arm64") else "amd64")
     elif "org.opencontainers.image.revision" in fmt:
         print(os.environ["PREVIOUS_SHA"] if "sha256:" + "a" * 64 in image else os.environ["NEW_LABEL_SHA"])
     else: raise SystemExit(3)
@@ -145,7 +145,7 @@ args=sys.argv[1:]
 if args[:1] == ["pull"]:
     pass
 elif args[:2] == ["image", "inspect"]:
-    print("amd64" if ".Architecture" in args[4] else os.environ["WRONG_LABEL"])
+    print(("arm64" if os.uname().machine in ("aarch64", "arm64") else "amd64") if ".Architecture" in args[4] else os.environ["WRONG_LABEL"])
 else:
     raise SystemExit("unexpected command: " + repr(args))
 ''')
@@ -179,7 +179,7 @@ volume=pathlib.Path(os.environ["MOCK_VOLUME_PATH"])
 if args[:1] == ["pull"]:
     pass
 elif args[:2] == ["image", "inspect"]:
-    print("amd64" if ".Architecture" in args[4] else os.environ["IMAGE_LABEL"])
+    print(("arm64" if os.uname().machine in ("aarch64", "arm64") else "amd64") if ".Architecture" in args[4] else os.environ["IMAGE_LABEL"])
 elif args[:2] == ["volume", "inspect"]:
     if args[2] != os.environ["EXPECTED_VOLUME_NAME"]:
         raise SystemExit("volume inspection targeted a non-candidate volume")
