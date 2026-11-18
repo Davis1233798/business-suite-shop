@@ -214,6 +214,8 @@ export const shopPromotions = sqliteTable("shop_promotions", {
   minSpend: integer("min_spend").notNull().default(0),
   expiresAt: text("expires_at"),
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  usageLimit: integer("usage_limit"),
+  timesUsed: integer("times_used").notNull().default(0),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 

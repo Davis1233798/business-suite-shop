@@ -156,6 +156,8 @@ CREATE TABLE `shop_promotions` (
 	`min_spend` integer DEFAULT 0 NOT NULL,
 	`expires_at` text,
 	`is_active` integer DEFAULT true NOT NULL,
+	`usage_limit` integer,
+	`times_used` integer DEFAULT 0 NOT NULL,
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 --> statement-breakpoint

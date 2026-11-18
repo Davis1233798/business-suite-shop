@@ -166,6 +166,14 @@ func openDB(file string) (*sql.DB, error) {
 	if _, e = tx.Exec("CREATE TABLE IF NOT EXISTS shop_repository_schema (version INTEGER NOT NULL); INSERT INTO shop_repository_schema(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM shop_repository_schema); UPDATE shop_repository_schema SET version=3 WHERE version<3"); e != nil {
 		return nil, e
 	}
+	var hasUsageLimit int
+	if e = tx.QueryRow("SELECT count(*) FROM pragma_table_info('shop_promotions') WHERE name='usage_limit'").Scan(&hasUsageLimit); e == nil && hasUsageLimit == 0 {
+		_, _ = tx.Exec("ALTER TABLE shop_promotions ADD COLUMN usage_limit INTEGER DEFAULT NULL")
+	}
+	var hasTimesUsed int
+	if e = tx.QueryRow("SELECT count(*) FROM pragma_table_info('shop_promotions') WHERE name='times_used'").Scan(&hasTimesUsed); e == nil && hasTimesUsed == 0 {
+		_, _ = tx.Exec("ALTER TABLE shop_promotions ADD COLUMN times_used INTEGER NOT NULL DEFAULT 0")
+	}
 	if e = tx.Commit(); e != nil {
 		return nil, e
 	}
