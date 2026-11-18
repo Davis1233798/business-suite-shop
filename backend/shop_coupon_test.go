@@ -497,3 +497,346 @@ func TestShopCouponFreshAndV2SchemaUpgradeIsIdempotent(t *testing.T) {
 		}
 	}
 }
+
+func addCouponWithUsageLimit(t *testing.T, a *App, org, code, kind string, value, minSpend int, expires any, active int, usageLimit any) {
+	t.Helper()
+	if _, err := a.db.Exec("INSERT INTO shop_promotions(id,organization_id,code,description,discount_type,discount_value,min_spend,expires_at,is_active,usage_limit,times_used) VALUES(?,?,?,?,?,?,?,?,?,?,0)", "coupon-promo-"+token(), org, code, "coupon test", kind, value, minSpend, expires, active, usageLimit); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestShopCouponTenDollarThreeItemAllocationConservesRemainder(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+	var productID string
+	if err := a.db.QueryRow("SELECT product_id FROM shop_variants WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantA).Scan(&productID); err != nil {
+		t.Fatal(err)
+	}
+	variantC := "coupon-variant-c-" + token()
+	if _, err := a.db.Exec("INSERT INTO shop_variants(id,organization_id,product_id,sku,title,price,stock_quantity,reserved_quantity,is_active) VALUES(?,?,?,?,?,?,20,0,1)", variantC, catalog.orgID, productID, "SKU-"+variantC, "Variant C", 100); err != nil {
+		t.Fatal(err)
+	}
+	addCouponTestPromotion(t, a, catalog.orgID, "SAVE10FIXED", "fixed", 10, 100, nil, 1)
+	w := couponCheckout(a, catalog.admin, "coupon-three-item-01", "SAVE10FIXED",
+		map[string]any{"variantId": catalog.variantA, "quantity": 1},
+		map[string]any{"variantId": catalog.variantB, "quantity": 1},
+		map[string]any{"variantId": variantC, "quantity": 1},
+	)
+	if w.Code != http.StatusOK {
+		t.Fatalf("three-item coupon checkout: %d %s", w.Code, w.Body.String())
+	}
+	var res struct {
+		Data struct {
+			OrderID        string `json:"orderId"`
+			Subtotal       int    `json:"subtotal"`
+			DiscountAmount int    `json:"discountAmount"`
+			ShippingFee    int    `json:"shippingFee"`
+			TotalAmount    int    `json:"totalAmount"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Data.Subtotal != 300 || res.Data.DiscountAmount != 10 || res.Data.ShippingFee != 60 || res.Data.TotalAmount != 350 {
+		t.Fatalf("unexpected order totals: %+v", res.Data)
+	}
+	rows, err := a.db.Query("SELECT line_total FROM shop_order_items WHERE organization_id=? AND order_id=? ORDER BY line_total DESC", catalog.orgID, res.Data.OrderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var lineTotals []int
+	var totalLineSum int
+	for rows.Next() {
+		var lt int
+		if err := rows.Scan(&lt); err != nil {
+			t.Fatal(err)
+		}
+		lineTotals = append(lineTotals, lt)
+		totalLineSum += lt
+	}
+	if totalLineSum != 290 {
+		t.Fatalf("sum of line totals = %d, want 290", totalLineSum)
+	}
+	if len(lineTotals) != 3 || lineTotals[0] != 97 || lineTotals[1] != 97 || lineTotals[2] != 96 {
+		t.Fatalf("line totals = %v, want [97, 97, 96]", lineTotals)
+	}
+}
+
+func TestShopCouponUsageLimitAtomicDecrementAndOverUsagePrevention(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+	addCouponWithUsageLimit(t, a, catalog.orgID, "LIMITED2", "fixed", 20, 100, nil, 1, 2)
+
+	w1 := couponCheckout(a, catalog.admin, "limited-checkout-01", "LIMITED2", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first checkout with limited coupon: %d %s", w1.Code, w1.Body.String())
+	}
+	var usageLimit, timesUsed int
+	if err := a.db.QueryRow("SELECT COALESCE(usage_limit,0), times_used FROM shop_promotions WHERE organization_id=? AND code='LIMITED2'", catalog.orgID).Scan(&usageLimit, &timesUsed); err != nil {
+		t.Fatal(err)
+	}
+	if usageLimit != 1 || timesUsed != 1 {
+		t.Fatalf("after first checkout: usageLimit=%d timesUsed=%d, want 1, 1", usageLimit, timesUsed)
+	}
+
+	w2 := couponCheckout(a, catalog.admin, "limited-checkout-02", "LIMITED2", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second checkout with limited coupon: %d %s", w2.Code, w2.Body.String())
+	}
+	if err := a.db.QueryRow("SELECT COALESCE(usage_limit,0), times_used FROM shop_promotions WHERE organization_id=? AND code='LIMITED2'", catalog.orgID).Scan(&usageLimit, &timesUsed); err != nil {
+		t.Fatal(err)
+	}
+	if usageLimit != 0 || timesUsed != 2 {
+		t.Fatalf("after second checkout: usageLimit=%d timesUsed=%d, want 0, 2", usageLimit, timesUsed)
+	}
+
+	w3 := couponCheckout(a, catalog.admin, "limited-checkout-03", "LIMITED2", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+	if w3.Code != http.StatusConflict {
+		t.Fatalf("third checkout when quota exhausted: %d %s, want 409", w3.Code, w3.Body.String())
+	}
+
+	addCouponWithUsageLimit(t, a, catalog.orgID, "RACE1", "fixed", 10, 100, nil, 1, 1)
+	const concurrentUsers = 8
+	var wg sync.WaitGroup
+	statusCodes := make(chan int, concurrentUsers)
+	for i := 0; i < concurrentUsers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			w := couponCheckout(a, catalog.admin, fmt.Sprintf("race-coupon-%d", idx), "RACE1", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+			statusCodes <- w.Code
+		}(i)
+	}
+	wg.Wait()
+	close(statusCodes)
+
+	successes, conflicts := 0, 0
+	for code := range statusCodes {
+		if code == http.StatusOK {
+			successes++
+		} else if code == http.StatusConflict {
+			conflicts++
+		} else {
+			t.Errorf("unexpected status code: %d", code)
+		}
+	}
+	if successes != 1 || conflicts != concurrentUsers-1 {
+		t.Fatalf("concurrent coupon race: successes=%d conflicts=%d, want 1 success and %d conflicts", successes, conflicts, concurrentUsers-1)
+	}
+	if err := a.db.QueryRow("SELECT COALESCE(usage_limit,0), times_used FROM shop_promotions WHERE organization_id=? AND code='RACE1'", catalog.orgID).Scan(&usageLimit, &timesUsed); err != nil {
+		t.Fatal(err)
+	}
+	if usageLimit != 0 || timesUsed != 1 {
+		t.Fatalf("after concurrent race: usageLimit=%d timesUsed=%d, want 0, 1", usageLimit, timesUsed)
+	}
+}
+
+func TestShopConcurrentCheckoutAtomicInventoryDecrementPreventsOversell(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+	if _, err := a.db.Exec("UPDATE shop_variants SET stock_quantity=2, reserved_quantity=0 WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantA); err != nil {
+		t.Fatal(err)
+	}
+
+	const competitors = 8
+	var wg sync.WaitGroup
+	results := make(chan int, competitors)
+	for i := 0; i < competitors; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			w := couponCheckout(a, catalog.admin, fmt.Sprintf("stock-race-%d", idx), "", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+			results <- w.Code
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for code := range results {
+		if code == http.StatusOK {
+			successes++
+		} else if code == http.StatusConflict {
+			conflicts++
+		} else {
+			t.Errorf("unexpected stock race status code: %d", code)
+		}
+	}
+	if successes != 2 || conflicts != competitors-2 {
+		t.Fatalf("stock race results: successes=%d conflicts=%d, want 2 successes and %d conflicts", successes, conflicts, competitors-2)
+	}
+	var finalStock int
+	if err := a.db.QueryRow("SELECT stock_quantity FROM shop_variants WHERE organization_id=? AND id=?", catalog.orgID, catalog.variantA).Scan(&finalStock); err != nil {
+		t.Fatal(err)
+	}
+	if finalStock != 0 {
+		t.Fatalf("final stock = %d, want 0", finalStock)
+	}
+}
+
+func TestShopCheckoutIdempotencyDuplicateAndTamperRejection(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+	foreign := seedCouponTestCatalog(t, a)
+
+	key := "idempotent-checkout-test-01"
+	w1 := couponCheckout(a, catalog.admin, key, "", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("initial checkout: %d %s", w1.Code, w1.Body.String())
+	}
+	var res1 struct {
+		Data struct {
+			OrderID   string `json:"orderId"`
+			Duplicate bool   `json:"duplicate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w1.Body.Bytes(), &res1); err != nil || res1.Data.OrderID == "" || res1.Data.Duplicate {
+		t.Fatalf("initial result: %+v err=%v", res1, err)
+	}
+
+	w2 := couponCheckout(a, catalog.admin, key, "", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("replay checkout: %d %s", w2.Code, w2.Body.String())
+	}
+	var res2 struct {
+		Data struct {
+			OrderID   string `json:"orderId"`
+			Duplicate bool   `json:"duplicate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &res2); err != nil || res2.Data.OrderID != res1.Data.OrderID || !res2.Data.Duplicate {
+		t.Fatalf("replay result: %+v err=%v", res2, err)
+	}
+
+	tamperedQty := couponCheckout(a, catalog.admin, key, "", map[string]any{"variantId": catalog.variantA, "quantity": 2})
+	if tamperedQty.Code != http.StatusConflict {
+		t.Fatalf("tampered quantity status: %d %s, want 409", tamperedQty.Code, tamperedQty.Body.String())
+	}
+
+	addCouponTestPromotion(t, a, catalog.orgID, "IDEM-SAVE", "fixed", 5, 50, nil, 1)
+	tamperedCoupon := couponCheckout(a, catalog.admin, key, "IDEM-SAVE", map[string]any{"variantId": catalog.variantA, "quantity": 1})
+	if tamperedCoupon.Code != http.StatusConflict {
+		t.Fatalf("tampered coupon status: %d %s, want 409", tamperedCoupon.Code, tamperedCoupon.Body.String())
+	}
+
+	wForeign := couponCheckout(a, foreign.admin, key, "", map[string]any{"variantId": foreign.variantA, "quantity": 1})
+	if wForeign.Code != http.StatusOK {
+		t.Fatalf("foreign tenant using same idempotency key: %d %s", wForeign.Code, wForeign.Body.String())
+	}
+	var resForeign struct {
+		Data struct {
+			OrderID   string `json:"orderId"`
+			Duplicate bool   `json:"duplicate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(wForeign.Body.Bytes(), &resForeign); err != nil || resForeign.Data.OrderID == res1.Data.OrderID || resForeign.Data.Duplicate {
+		t.Fatalf("foreign tenant should create independent order: %+v", resForeign)
+	}
+}
+
+func TestShopRefundRejectsOverRefundAndWritesOutbox(t *testing.T) {
+	a := appForTest(t)
+	catalog := seedCouponTestCatalog(t, a)
+
+	w := couponCheckout(a, catalog.admin, "refund-test-order-key", "", map[string]any{"variantId": catalog.variantA, "quantity": 2})
+	if w.Code != http.StatusOK {
+		t.Fatalf("checkout for refund: %d %s", w.Code, w.Body.String())
+	}
+	var orderRes struct {
+		Data struct {
+			OrderID string `json:"orderId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &orderRes); err != nil {
+		t.Fatal(err)
+	}
+	orderID := orderRes.Data.OrderID
+	var itemID string
+	if err := a.db.QueryRow("SELECT id FROM shop_order_items WHERE organization_id=? AND order_id=?", catalog.orgID, orderID).Scan(&itemID); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingRefund := refundRequest(a, orderID, itemID, 1, "Early return", "refund-pending-key", catalog.admin...)
+	if pendingRefund.Code != http.StatusConflict {
+		t.Fatalf("refund on unpaid order status: %d %s, want 409", pendingRefund.Code, pendingRefund.Body.String())
+	}
+
+	if _, err := a.db.Exec("UPDATE shop_orders SET payment_status='paid' WHERE organization_id=? AND id=?", catalog.orgID, orderID); err != nil {
+		t.Fatal(err)
+	}
+
+	r1 := refundRequest(a, orderID, itemID, 1, "Partial return unit 1", "refund-key-01", catalog.admin...)
+	if r1.Code != http.StatusOK {
+		t.Fatalf("first refund: %d %s", r1.Code, r1.Body.String())
+	}
+
+	var auditCount, outboxCount int
+	if err := a.db.QueryRow("SELECT count(*) FROM audit_events WHERE organization_id=? AND entity_id=? AND action='shop.refund.create'", catalog.orgID, orderID).Scan(&auditCount); err != nil || auditCount != 1 {
+		t.Fatalf("audit count = %d, want 1 (err=%v)", auditCount, err)
+	}
+	if err := a.db.QueryRow("SELECT count(*) FROM outbox_events WHERE organization_id=? AND event_type='shop.refunded' AND payload LIKE ?", catalog.orgID, "%"+orderID+"%").Scan(&outboxCount); err != nil || outboxCount != 1 {
+		t.Fatalf("outbox count = %d, want 1 (err=%v)", outboxCount, err)
+	}
+
+	rOver := refundRequest(a, orderID, itemID, 2, "Over refund return", "refund-key-over", catalog.admin...)
+	if rOver.Code != http.StatusConflict {
+		t.Fatalf("over-refund status: %d %s, want 409", rOver.Code, rOver.Body.String())
+	}
+
+	r2 := refundRequest(a, orderID, itemID, 1, "Partial return unit 2", "refund-key-02", catalog.admin...)
+	if r2.Code != http.StatusOK {
+		t.Fatalf("second refund: %d %s", r2.Code, r2.Body.String())
+	}
+
+	rExcess := refundRequest(a, orderID, itemID, 1, "Excess refund", "refund-key-excess", catalog.admin...)
+	if rExcess.Code != http.StatusConflict {
+		t.Fatalf("excess refund status: %d %s, want 409", rExcess.Code, rExcess.Body.String())
+	}
+
+	if err := a.db.QueryRow("SELECT count(*) FROM audit_events WHERE organization_id=? AND entity_id=? AND action='shop.refund.create'", catalog.orgID, orderID).Scan(&auditCount); err != nil || auditCount != 2 {
+		t.Fatalf("final audit count = %d, want 2", auditCount)
+	}
+	if err := a.db.QueryRow("SELECT count(*) FROM outbox_events WHERE organization_id=? AND event_type='shop.refunded' AND payload LIKE ?", catalog.orgID, "%"+orderID+"%").Scan(&outboxCount); err != nil || outboxCount != 2 {
+		t.Fatalf("final outbox count = %d, want 2", outboxCount)
+	}
+}
+
+func TestShopCrossTenantCheckoutAndRefundIsolation(t *testing.T) {
+	a := appForTest(t)
+	tenantA := seedCouponTestCatalog(t, a)
+	tenantB := seedCouponTestCatalog(t, a)
+
+	addCouponTestPromotion(t, a, tenantA.orgID, "TENANT-A-COUPON", "percentage", 10, 50, nil, 1)
+
+	wCrossCoupon := couponCheckout(a, tenantB.admin, "cross-coupon-test", "TENANT-A-COUPON", map[string]any{"variantId": tenantB.variantA, "quantity": 1})
+	if wCrossCoupon.Code != http.StatusConflict {
+		t.Fatalf("tenant B using tenant A's coupon: %d %s, want 409", wCrossCoupon.Code, wCrossCoupon.Body.String())
+	}
+
+	wCrossVariant := couponCheckout(a, tenantB.admin, "cross-variant-test", "", map[string]any{"variantId": tenantA.variantA, "quantity": 1})
+	if wCrossVariant.Code != http.StatusNotFound {
+		t.Fatalf("tenant B purchasing tenant A's variant: %d %s, want 404", wCrossVariant.Code, wCrossVariant.Body.String())
+	}
+
+	wOrder := couponCheckout(a, tenantA.admin, "tenant-a-order-key", "", map[string]any{"variantId": tenantA.variantA, "quantity": 1})
+	if wOrder.Code != http.StatusOK {
+		t.Fatalf("tenant A checkout: %d %s", wOrder.Code, wOrder.Body.String())
+	}
+	var res struct {
+		Data struct {
+			OrderID string `json:"orderId"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(wOrder.Body.Bytes(), &res)
+	orderID := res.Data.OrderID
+	var itemID string
+	_ = a.db.QueryRow("SELECT id FROM shop_order_items WHERE organization_id=? AND order_id=?", tenantA.orgID, orderID).Scan(&itemID)
+	_, _ = a.db.Exec("UPDATE shop_orders SET payment_status='paid' WHERE organization_id=? AND id=?", tenantA.orgID, orderID)
+
+	wCrossRefund := refundRequest(a, orderID, itemID, 1, "Cross tenant return attempt", "cross-refund-key", tenantB.admin...)
+	if wCrossRefund.Code != http.StatusNotFound {
+		t.Fatalf("tenant B refunding tenant A's order: %d %s, want 404", wCrossRefund.Code, wCrossRefund.Body.String())
+	}
+}
+

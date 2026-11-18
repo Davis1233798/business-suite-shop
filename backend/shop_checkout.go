@@ -125,28 +125,33 @@ func parseShopCouponExpiry(value string) (time.Time, error) {
 	return time.Time{}, errors.New("invalid coupon expiry")
 }
 
-func shopCouponDiscount(tx *sql.Tx, organizationID, code string, subtotal int64, now time.Time) (int64, error) {
+func shopCouponDiscount(tx *sql.Tx, organizationID, code string, subtotal int64, now time.Time) (string, int64, error) {
 	if code == "" {
-		return 0, nil
+		return "", 0, nil
 	}
-	var kind string
+	var promoID, kind string
 	var value, minSpend int64
 	var expires sql.NullString
 	var active int
-	err := tx.QueryRow("SELECT discount_type,discount_value,min_spend,expires_at,is_active FROM shop_promotions WHERE organization_id=? AND code=?", organizationID, code).Scan(&kind, &value, &minSpend, &expires, &active)
+	var usageLimit sql.NullInt64
+	var timesUsed int64
+	err := tx.QueryRow("SELECT id,discount_type,discount_value,min_spend,expires_at,is_active,usage_limit,times_used FROM shop_promotions WHERE organization_id=? AND code=?", organizationID, code).Scan(&promoID, &kind, &value, &minSpend, &expires, &active, &usageLimit, &timesUsed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, errCheckoutCoupon
+		return "", 0, errCheckoutCoupon
 	}
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	if active != 1 || minSpend < 0 || subtotal < minSpend || value < 0 {
-		return 0, errCheckoutCoupon
+		return "", 0, errCheckoutCoupon
+	}
+	if usageLimit.Valid && usageLimit.Int64 <= 0 {
+		return "", 0, errCheckoutCoupon
 	}
 	if expires.Valid && strings.TrimSpace(expires.String) != "" {
 		deadline, parseErr := parseShopCouponExpiry(strings.TrimSpace(expires.String))
 		if parseErr != nil || !deadline.After(now) {
-			return 0, errCheckoutCoupon
+			return "", 0, errCheckoutCoupon
 		}
 	}
 	var discount int64
@@ -164,12 +169,12 @@ func shopCouponDiscount(tx *sql.Tx, organizationID, code string, subtotal int64,
 	case "fixed":
 		discount = value
 	default:
-		return 0, errCheckoutCoupon
+		return "", 0, errCheckoutCoupon
 	}
 	if discount > subtotal {
 		discount = subtotal
 	}
-	return discount, nil
+	return promoID, discount, nil
 }
 
 func allocateShopCouponDiscount(lines []checkoutResolvedLine, subtotal, discount int64) error {
@@ -326,7 +331,7 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 		subtotal += line.rawLineTotal
 		lines = append(lines, line)
 	}
-	couponDiscount, err := shopCouponDiscount(tx, organizationID, in.CouponCode, subtotal, time.Now().UTC())
+	promoID, couponDiscount, err := shopCouponDiscount(tx, organizationID, in.CouponCode, subtotal, time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -350,6 +355,23 @@ func checkoutOrder(ctx context.Context, db *sql.DB, organizationID, userID strin
 		}
 		if changed != 1 {
 			return nil, errCheckoutSoldOut
+		}
+	}
+	if promoID != "" {
+		res, promoErr := tx.Exec(`UPDATE shop_promotions 
+			SET times_used = times_used + 1,
+			    usage_limit = CASE WHEN usage_limit IS NOT NULL THEN usage_limit - 1 ELSE usage_limit END
+			WHERE id = ? AND organization_id = ? AND is_active = 1
+			  AND (usage_limit IS NULL OR usage_limit > 0)`, promoID, organizationID)
+		if promoErr != nil {
+			return nil, promoErr
+		}
+		changed, promoErr := res.RowsAffected()
+		if promoErr != nil {
+			return nil, promoErr
+		}
+		if changed != 1 {
+			return nil, errCheckoutCoupon
 		}
 	}
 	orderID := token()

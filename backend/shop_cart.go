@@ -139,7 +139,9 @@ func (a *App) shopCartCheckout(w http.ResponseWriter, r *http.Request, id *Ident
 		if isShopPostgresDB(a.db) {
 			validExpiry = "CASE WHEN expires_at IS NULL THEN 1 WHEN CAST(expires_at AS TIMESTAMPTZ)>CURRENT_TIMESTAMP THEN 1 ELSE 0 END"
 		}
-		e = tx.QueryRow("SELECT discount_type,discount_value,min_spend,is_active,"+validExpiry+" FROM shop_promotions WHERE organization_id=? AND code=?", id.OrganizationID, in.CouponCode).Scan(&kind, &value, &minSpend, &enabled, &validTime)
+		var usageLimit sql.NullInt64
+		var timesUsed int64
+		e = tx.QueryRow("SELECT discount_type,discount_value,min_spend,is_active,"+validExpiry+",usage_limit,times_used FROM shop_promotions WHERE organization_id=? AND code=?", id.OrganizationID, in.CouponCode).Scan(&kind, &value, &minSpend, &enabled, &validTime, &usageLimit, &timesUsed)
 		if errors.Is(e, sql.ErrNoRows) {
 			fail(w, 404, "Coupon not found")
 			return
@@ -148,7 +150,7 @@ func (a *App) shopCartCheckout(w http.ResponseWriter, r *http.Request, id *Ident
 			fail(w, 503, "Cannot read coupon")
 			return
 		}
-		if enabled != 1 || validTime != 1 || minSpend < 0 || subtotal < minSpend || value < 0 || value > 1000000000000000 {
+		if enabled != 1 || validTime != 1 || minSpend < 0 || subtotal < minSpend || value < 0 || value > 1000000000000000 || (usageLimit.Valid && usageLimit.Int64 <= 0) {
 			fail(w, 409, "Coupon is unavailable or minimum spend is not met")
 			return
 		}

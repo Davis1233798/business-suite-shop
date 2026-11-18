@@ -163,6 +163,13 @@ func createShopRefund(db *sql.DB, organizationID, actorID, actorRole string, in 
 	if err = tx.QueryRow("SELECT COALESCE(SUM(refund_amount),0) FROM shop_returns WHERE organization_id=? AND order_id=? AND status='refunded'", organizationID, in.OrderID).Scan(&orderRefundedAmount); err != nil {
 		return shopRefundResult{}, err
 	}
+	var orderPaidTotal int64
+	if err = tx.QueryRow("SELECT total_amount FROM shop_orders WHERE organization_id=? AND id=?", organizationID, in.OrderID).Scan(&orderPaidTotal); err != nil {
+		return shopRefundResult{}, err
+	}
+	if orderRefundedAmount > orderPaidTotal {
+		return shopRefundResult{}, errShopRefundConflict
+	}
 	if fulfillmentStatus == "unfulfilled" || fulfillmentStatus == "return_hold" {
 		var remainingLines int
 		if err = tx.QueryRow(`SELECT COUNT(*) FROM shop_order_items i WHERE i.organization_id=? AND i.order_id=? AND i.quantity>COALESCE((SELECT SUM(r.quantity) FROM shop_returns r WHERE r.organization_id=i.organization_id AND r.order_item_id=i.id),0)`, organizationID, in.OrderID).Scan(&remainingLines); err != nil {
@@ -196,6 +203,22 @@ func createShopRefund(db *sql.DB, organizationID, actorID, actorRole string, in 
 	before, _ := json.Marshal(map[string]any{"paymentStatus": paymentStatus, "fulfillmentStatus": originalFulfillmentStatus, "trackingNumber": trackingNumber, "itemRefundedQuantity": alreadyReturned})
 	after, _ := json.Marshal(result)
 	if _, err = tx.Exec("INSERT INTO audit_events(id,organization_id,actor_id,actor_role,action,entity_type,entity_id,before_value,after_value,reason) VALUES(?,?,?,?,?,'shop_order',?,?,?,?)", token(), organizationID, actorID, actorRole, "shop.refund.create", in.OrderID, string(before), string(after), in.Reason); err != nil {
+		return shopRefundResult{}, err
+	}
+	outboxID := "outbox_" + token()
+	outboxPayload, err := json.Marshal(map[string]any{
+		"orderId":              in.OrderID,
+		"orderItemId":          in.OrderItemID,
+		"refundAmount":         refundAmount,
+		"refundedQuantity":     requestedQuantity,
+		"itemRefundedQuantity": cumulativeQuantity,
+		"paymentStatus":        paymentStatus,
+		"fulfillmentStatus":    fulfillmentStatus,
+	})
+	if err != nil {
+		return shopRefundResult{}, err
+	}
+	if _, err = tx.Exec("INSERT INTO outbox_events(id,organization_id,event_type,payload) VALUES(?,?,'shop.refunded',?)", outboxID, organizationID, string(outboxPayload)); err != nil {
 		return shopRefundResult{}, err
 	}
 	if err = tx.Commit(); err != nil {

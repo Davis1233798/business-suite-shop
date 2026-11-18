@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS shop_promotions (
   min_spend BIGINT NOT NULL DEFAULT 0,
   expires_at TEXT,
   is_active INTEGER NOT NULL DEFAULT 1,
+  usage_limit BIGINT,
+  times_used BIGINT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (organization_id, code)
 );

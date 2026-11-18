@@ -257,7 +257,7 @@ func TestShopPortfolioImportPreservesLegacyOrders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec("DROP TABLE shop_repository_schema; ALTER TABLE shop_orders DROP COLUMN coupon_code; ALTER TABLE shop_payment_attempts DROP COLUMN actor_id; ALTER TABLE shop_payment_attempts DROP COLUMN actor_role")
+	_, err = db.Exec("DROP TABLE shop_repository_schema; ALTER TABLE shop_orders DROP COLUMN coupon_code; ALTER TABLE shop_payment_attempts DROP COLUMN actor_id; ALTER TABLE shop_payment_attempts DROP COLUMN actor_role; ALTER TABLE shop_promotions DROP COLUMN usage_limit; ALTER TABLE shop_promotions DROP COLUMN times_used")
 	closeErr := db.Close()
 	if err != nil || closeErr != nil {
 		t.Fatalf("prepare legacy fixture: %v / %v", err, closeErr)
