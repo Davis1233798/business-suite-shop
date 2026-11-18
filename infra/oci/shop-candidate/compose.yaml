@@ -1,0 +1,42 @@
+name: business-suite-shop-candidate
+
+services:
+  shop-candidate:
+    image: ${SHOP_CANDIDATE_IMAGE:?set an immutable Shop image digest}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    environment:
+      SUITE_RELEASE_SHA: ${SHOP_CANDIDATE_REVISION:?set the source commit}
+      SUITE_WEB: /srv/station/web-dist
+      SUITE_DB: /srv/station/data/shop-candidate.sqlite
+      SUITE_ADDR: 0.0.0.0:8095
+    ports:
+      - "127.0.0.1:${SHOP_CANDIDATE_PORT:-18195}:8095"
+    volumes:
+      - candidate-data:/srv/station/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    networks: [candidate]
+    healthcheck:
+      test: ["CMD", "/srv/station/station-server", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+networks:
+  candidate:
+    name: ${SHOP_CANDIDATE_NETWORK:-shop-private-candidate}
+    # internal: true - host loopback published port requires standard bridge routing
+    labels:
+      com.business-suite.shop-candidate.owner: ${SHOP_CANDIDATE_OWNER:-host}
+
+volumes:
+  candidate-data:
+    name: ${SHOP_CANDIDATE_VOLUME:-business-suite-shop-candidate-data}
+    labels:
+      com.business-suite.shop-candidate.owner: ${SHOP_CANDIDATE_OWNER:-host}
