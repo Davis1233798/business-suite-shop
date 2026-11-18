@@ -8,6 +8,7 @@ permissions:
 jobs:
   shop:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -76,6 +77,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [shop]
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest

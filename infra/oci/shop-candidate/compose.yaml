@@ -31,7 +31,7 @@ services:
 networks:
   candidate:
     name: ${SHOP_CANDIDATE_NETWORK:-shop-private-candidate}
-    internal: true
+    # internal: true - host loopback published port requires standard bridge routing
     labels:
       com.business-suite.shop-candidate.owner: ${SHOP_CANDIDATE_OWNER:-host}
 
